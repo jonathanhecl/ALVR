@@ -14,9 +14,6 @@ const ALVR_DIR_STORAGE_FNAME: &str = "alvr_dir.txt";
 const DRIVER_PATHS_BACKUP_FNAME: &str = "alvr_drivers_paths_backup.txt";
 const INSTALLER_FNAME: &str = "alvr_installer";
 
-#[cfg(windows)]
-pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 #[cfg(target_os = "linux")]
 pub fn exec_fname(name: &str) -> String {
     name.to_owned()
@@ -133,7 +130,7 @@ fn get_alvr_dir_from_storage() -> StrResult<PathBuf> {
 
 pub fn get_alvr_dir_from_registered_drivers() -> StrResult<PathBuf> {
     for dir in get_registered_drivers()? {
-        if dir.join(exec_fname("ALVR launcher")).exists() && dir.join("web_gui").exists() {
+        if dir.join(exec_fname("ALVR launcher")).exists() && dir.join("dashboard").exists() {
             return Ok(dir);
         }
     }

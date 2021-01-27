@@ -204,7 +204,6 @@ pub fn build_server(is_release: bool, is_nightly: bool, fetch_crates: bool) {
     let target_dir = target_dir();
     let artifacts_dir = target_dir.join(build_type);
     let driver_dst_dir = server_build_dir().join("bin").join(STEAMVR_OS_DIR_NAME);
-    let swresample_dir = workspace_dir().join("alvr/server/cpp/libswresample/lib");
     let openvr_api_dir = workspace_dir().join("alvr/server/cpp/openvr/lib");
 
     reset_server_build_folder();
@@ -235,21 +234,21 @@ pub fn build_server(is_release: bool, is_nightly: bool, fetch_crates: bool) {
         ))
         .unwrap();
     }
-    fs::copy(
-        artifacts_dir.join(dynlib_fname("alvr_server")),
-        driver_dst_dir.join(DRIVER_FNAME),
-    )
-    .unwrap();
-    fs::copy(
-        swresample_dir.join("avutil-56.dll"),
-        driver_dst_dir.join("avutil-56.dll"),
-    )
-    .unwrap();
-    fs::copy(
-        swresample_dir.join("swresample-3.dll"),
-        driver_dst_dir.join("swresample-3.dll"),
-    )
-    .unwrap();
+    if cfg!(not(target_os = "linux")) {
+        fs::copy(
+            artifacts_dir.join(dynlib_fname("alvr_server")),
+            driver_dst_dir.join(DRIVER_FNAME),
+        )
+        .unwrap();
+    } else {
+        // patch for executing the webserver without steamvr
+        fs::copy(
+            artifacts_dir.join(exec_fname("alvr_server")),
+            driver_dst_dir.join(exec_fname("alvr_server")),
+        )
+        .unwrap();
+    }
+
     fs::copy(
         openvr_api_dir.join("openvr_api.dll"),
         driver_dst_dir.join("openvr_api.dll"),
