@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use settings_schema::*;
 
-use crate::StrResult;
-
 #[derive(SettingsSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type", content = "content")]
 pub enum FrameSize {
@@ -122,60 +120,33 @@ pub struct VideoDesc {
     pub color_correction: Switch<ColorCorrectionDesc>,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, PartialEq, Debug, Clone, Copy)]
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "type", content = "content")]
-pub enum SampleFormat {
-    Int16,
-    Float32,
-}
-
-impl SampleFormat {
-    pub fn to_cpal(self) -> cpal::SampleFormat {
-        match self {
-            Self::Int16 => cpal::SampleFormat::I16,
-            Self::Float32 => cpal::SampleFormat::F32,
-        }
-    }
-
-    pub fn from_cpal(format: cpal::SampleFormat) -> StrResult<Self> {
-        match format {
-            cpal::SampleFormat::I16 => Ok(Self::Int16),
-            cpal::SampleFormat::F32 => Ok(Self::Float32),
-            _ => Err("Unsupported".into()),
-        }
-    }
-}
-
-#[derive(SettingsSchema, Serialize, Deserialize, PartialEq, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioConfig {
-    pub channels_count: u16,
-    pub sample_rate: u32,
-    pub buffer_size: Option<u32>,
-    pub sample_format: SampleFormat,
-    pub buffer_range_multiplier: u64,
+pub enum AudioDeviceId {
+    Default,
+    Name(String),
+    #[schema(min = 1, gui = "UpDown")]
+    Index(u64),
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputAudioDesc {
-    #[schema(gui = "UpDown")]
-    pub device_index: Option<u64>,
+    pub device_id: AudioDeviceId,
 
     pub mute_when_streaming: bool,
 
-    #[schema(advanced)]
-    pub preferred_config: AudioConfig,
+    #[schema(min = 1, max = 10)]
+    pub buffer_range_multiplier: u64,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InputAudioDesc {
-    // deviceDropdown should poll the available audio devices and set "device"
-    #[schema(placeholder = "device_dropdown")]
-    //
-    #[schema(advanced)]
-    pub device: String,
+    pub device_id: AudioDeviceId,
+
+    #[schema(min = 1, max = 10)]
+    pub buffer_range_multiplier: u64,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize)]
@@ -293,6 +264,13 @@ pub struct HeadsetDesc {
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type", content = "content")]
+pub enum SocketConfig {
+    Udp,
+    Tcp,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionDesc {
     #[schema(advanced)]
@@ -301,8 +279,10 @@ pub struct ConnectionDesc {
     #[schema(advanced, min = 1024, max = 65535)]
     pub web_server_port: u16,
 
+    pub stream_config: SocketConfig,
+
     #[schema(advanced)]
-    pub listen_port: u16,
+    pub stream_port: u16,
 
     // If disableThrottling=true, set throttlingBitrateBits to 0,
     // Given audioBitrate=2000'000:
@@ -430,28 +410,25 @@ pub fn session_settings_default() -> SettingsDefault {
             game_audio: SwitchDefault {
                 enabled: true,
                 content: OutputAudioDescDefault {
-                    device_index: OptionalDefault {
-                        set: false,
-                        content: 0,
+                    device_id: AudioDeviceIdDefault {
+                        variant: AudioDeviceIdDefaultVariant::Default,
+                        Name: "".into(),
+                        Index: 1,
                     },
                     mute_when_streaming: true,
-                    preferred_config: AudioConfigDefault {
-                        channels_count: 2,
-                        sample_rate: 44100,
-                        buffer_size: OptionalDefault {
-                            set: false,
-                            content: 0,
-                        },
-                        sample_format: SampleFormatDefault {
-                            variant: SampleFormatDefaultVariant::Int16,
-                        },
-                        buffer_range_multiplier: 2,
-                    },
+                    buffer_range_multiplier: 2,
                 },
             },
             microphone: SwitchDefault {
                 enabled: false,
-                content: InputAudioDescDefault { device: "".into() },
+                content: InputAudioDescDefault {
+                    device_id: AudioDeviceIdDefault {
+                        variant: AudioDeviceIdDefaultVariant::Default,
+                        Name: "".into(),
+                        Index: 1,
+                    },
+                    buffer_range_multiplier: 4,
+                },
             },
         },
         headset: HeadsetDescDefault {
@@ -495,7 +472,10 @@ pub fn session_settings_default() -> SettingsDefault {
         connection: ConnectionDescDefault {
             auto_trust_clients: cfg!(debug_assertions),
             web_server_port: 8082,
-            listen_port: 9944,
+            stream_config: SocketConfigDefault {
+                variant: SocketConfigDefaultVariant::Tcp,
+            },
+            stream_port: 9944,
             throttling_bitrate_bits: 30_000_000 * 3 / 2 + 2_000_000,
             client_recv_buffer_size: 60_000,
             aggressive_keyframe_resend: false,

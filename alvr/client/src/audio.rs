@@ -1,10 +1,14 @@
-use alvr_common::{data::AudioConfig, *};
+use alvr_common::{
+    sockets::{StreamReceiver, StreamSender},
+    *,
+};
+use bytes::BytesMut;
 use oboe::*;
-use std::{collections::VecDeque, mem::size_of, sync::mpsc::Receiver};
-use tokio::sync::mpsc::UnboundedSender;
+use std::{collections::VecDeque, mem, sync::mpsc as smpsc, thread};
+use tokio::sync::mpsc as tmpsc;
 
 struct RecorderCallback {
-    sender: UnboundedSender<Vec<u8>>,
+    sender: tmpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl AudioInputCallback for RecorderCallback {
@@ -15,7 +19,7 @@ impl AudioInputCallback for RecorderCallback {
         _: &mut dyn AudioInputStreamSafe,
         frames: &[i16],
     ) -> DataCallbackResult {
-        let mut sample_buffer = Vec::with_capacity(frames.len() * size_of::<i16>());
+        let mut sample_buffer = Vec::with_capacity(frames.len() * mem::size_of::<i16>());
 
         for frame in frames {
             sample_buffer.extend(&frame.to_ne_bytes());
@@ -27,42 +31,49 @@ impl AudioInputCallback for RecorderCallback {
     }
 }
 
-pub struct AudioRecorder {
-    stream: AudioStreamAsync<Input, RecorderCallback>,
-}
+pub async fn record_audio_loop(sample_rate: u32, sender: StreamSender<()>) -> StrResult {
+    let (_shutdown_notifier, shutdown_receiver) = smpsc::channel::<()>();
+    let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
 
-impl AudioRecorder {
-    pub fn start(config: AudioConfig, sender: UnboundedSender<Vec<u8>>) -> StrResult<Self> {
-        // Oboe doesn't support untyped callbacks. For convenience, not all configs are respected
+    thread::spawn(move || -> StrResult {
         let mut stream = trace_err!(AudioStreamBuilder::default()
             .set_shared()
             .set_performance_mode(PerformanceMode::LowLatency)
-            .set_sample_rate(config.sample_rate as _)
+            .set_sample_rate(sample_rate as _)
             .set_sample_rate_conversion_quality(SampleRateConversionQuality::Fastest)
             .set_mono()
             .set_i16()
             .set_input()
             .set_usage(Usage::VoiceCommunication)
             .set_input_preset(InputPreset::VoiceCommunication)
-            .set_callback(RecorderCallback { sender })
+            .set_callback(RecorderCallback {
+                sender: data_sender
+            })
             .open_stream())?;
 
         trace_err!(stream.start())?;
 
-        Ok(Self { stream })
+        shutdown_receiver.recv().ok();
+
+        // This call gets stuck if the headset goes to sleep, but finishes when the headset wakes up
+        stream.stop_with_timeout(0).ok();
+
+        Ok(())
+    });
+
+    while let Some(data) = data_receiver.recv().await {
+        let mut buffer = sender.new_buffer(&(), data.len())?;
+        buffer.get_mut().extend(data);
+        sender.send_buffer(buffer).await?;
     }
+
+    Ok(())
 }
 
-impl Drop for AudioRecorder {
-    fn drop(&mut self) {
-        self.stream.stop().ok();
-    }
-}
-
-const OUTPUT_FRAME_SIZE: usize = 2 * size_of::<i16>();
+const OUTPUT_FRAME_SIZE: usize = 2 * mem::size_of::<i16>();
 
 struct PlayerCallback {
-    receiver: Receiver<Vec<u8>>,
+    receiver: smpsc::Receiver<BytesMut>,
     sample_buffer: VecDeque<u8>,
     buffer_range_multiplier: usize,
     last_input_buffer_size: usize,
@@ -116,38 +127,44 @@ impl AudioOutputCallback for PlayerCallback {
         DataCallbackResult::Continue
     }
 }
+pub async fn play_audio_loop(
+    sample_rate: u32,
+    buffer_range_multiplier: u64,
+    mut receiver: StreamReceiver<()>,
+) -> StrResult {
+    let (_shutdown_notifier, shutdown_receiver) = smpsc::channel::<BytesMut>();
+    let (data_sender, data_receiver) = smpsc::channel();
 
-pub struct AudioPlayer {
-    stream: AudioStreamAsync<Output, PlayerCallback>,
-}
-
-impl AudioPlayer {
-    pub fn start(config: AudioConfig, receiver: Receiver<Vec<u8>>) -> StrResult<Self> {
+    thread::spawn(move || -> StrResult {
         let mut stream = trace_err!(AudioStreamBuilder::default()
             .set_shared()
             .set_performance_mode(PerformanceMode::LowLatency)
-            .set_sample_rate(config.sample_rate as _)
+            .set_sample_rate(sample_rate as _)
             .set_sample_rate_conversion_quality(SampleRateConversionQuality::Fastest)
             .set_stereo()
             .set_i16()
             .set_output()
             .set_usage(Usage::Game)
             .set_callback(PlayerCallback {
-                receiver,
+                receiver: data_receiver,
                 sample_buffer: VecDeque::new(),
-                buffer_range_multiplier: config.buffer_range_multiplier as _,
+                buffer_range_multiplier: buffer_range_multiplier as _,
                 last_input_buffer_size: 0,
             })
             .open_stream())?;
 
         trace_err!(stream.start())?;
 
-        Ok(Self { stream })
-    }
-}
+        shutdown_receiver.recv().ok();
 
-impl Drop for AudioPlayer {
-    fn drop(&mut self) {
-        self.stream.stop().ok();
+        // Note: Oboe crahes if stream.stop() is NOT called on AudioPlayer
+        stream.stop_with_timeout(0).ok();
+
+        Ok(())
+    });
+
+    loop {
+        let (_, data) = receiver.recv_buffer().await?;
+        trace_err!(data_sender.send(data))?;
     }
 }

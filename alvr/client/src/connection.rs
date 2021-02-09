@@ -1,5 +1,10 @@
 use crate::audio;
-use alvr_common::{data::*, logging::*, sockets::ConnectionResult, *};
+use alvr_common::{
+    data::*,
+    logging::*,
+    sockets::{ConnectionResult, AUDIO},
+    *,
+};
 use futures::future::BoxFuture;
 use jni::{
     objects::{GlobalRef, JClass},
@@ -8,12 +13,13 @@ use jni::{
 use nalgebra::{Point3, Quaternion, UnitQuaternion};
 use serde_json as json;
 use settings_schema::Switch;
+use sockets::StreamSocket;
 use std::{
     ffi::CString,
     future, slice,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc as smpsc, Arc,
+        Arc,
     },
     time::Duration,
 };
@@ -34,7 +40,7 @@ const INCOMPATIBLE_VERSIONS_MESSAGE: &str = concat!(
 );
 const SERVER_RESTART_MESSAGE: &str = "The server is restarting\nPlease wait...";
 const SERVER_DISCONNECTED_MESSAGE: &str = "The server has disconnected.";
-const RETRY_CONNECT_INTERVAL: Duration = Duration::from_millis(500);
+const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const PLAYSPACE_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 const NETWORK_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -120,7 +126,7 @@ async fn connection_pipeline(
             )
             .await?;
 
-            time::sleep(RETRY_CONNECT_INTERVAL).await;
+            time::sleep(RETRY_CONNECT_MIN_INTERVAL).await;
 
             set_loading_message(
                 &*java_vm,
@@ -136,13 +142,50 @@ async fn connection_pipeline(
     };
     let control_sender = Arc::new(Mutex::new(control_sender));
 
-    info!("Connected to server");
+    match control_receiver.recv().await {
+        Ok(ServerControlPacket::StartStream) => (),
+        Ok(ServerControlPacket::Restarting) => {
+            info!("Server restarting");
+            set_loading_message(&*java_vm, &*activity_ref, hostname, SERVER_RESTART_MESSAGE)
+                .await?;
+            return Ok(());
+        }
+        Err(e) => {
+            info!("Server disconnected. Cause: {}", e);
+            set_loading_message(
+                &*java_vm,
+                &*activity_ref,
+                hostname,
+                SERVER_DISCONNECTED_MESSAGE,
+            )
+            .await?;
+            return Ok(());
+        }
+        _ => {
+            info!("Unexpected packet");
+            set_loading_message(&*java_vm, &*activity_ref, hostname, "Unexpected packet").await?;
+            return Ok(());
+        }
+    }
 
-    let baseline_settings = {
+    let settings = {
         let mut session_desc = SessionDesc::default();
         session_desc.merge_from_json(&trace_err!(json::from_str(&config_packet.session_desc))?)?;
         session_desc.to_settings()
     };
+
+    let mut stream_socket = tokio::select! {
+        res = StreamSocket::connect_to_server(
+            server_ip,
+            settings.connection.stream_port,
+            settings.connection.stream_config,
+        ) => res?,
+        _ = time::sleep(Duration::from_secs(2)) => {
+            return fmt_e!("Timeout while setting up streams");
+        }
+    };
+
+    info!("Connected to server");
 
     let is_connected = Arc::new(AtomicBool::new(true));
     let _stream_guard = StreamCloseGuard {
@@ -153,7 +196,7 @@ async fn connection_pipeline(
         &*activity_ref,
         "setDarkMode",
         "(Z)V",
-        &[baseline_settings.extra.client_dark_mode.into()],
+        &[settings.extra.client_dark_mode.into()],
     ))?;
 
     unsafe {
@@ -161,37 +204,30 @@ async fn connection_pipeline(
             eyeWidth: config_packet.eye_resolution_width,
             eyeHeight: config_packet.eye_resolution_height,
             refreshRate: config_packet.fps,
-            streamMic: matches!(baseline_settings.audio.microphone, Switch::Enabled(_)),
-            enableFoveation: matches!(
-                baseline_settings.video.foveated_rendering,
-                Switch::Enabled(_)
-            ),
+            enableFoveation: matches!(settings.video.foveated_rendering, Switch::Enabled(_)),
             foveationStrength: if let Switch::Enabled(foveation_vars) =
-                &baseline_settings.video.foveated_rendering
+                &settings.video.foveated_rendering
             {
                 foveation_vars.strength
             } else {
                 0_f32
             },
             foveationShape: if let Switch::Enabled(foveation_vars) =
-                &baseline_settings.video.foveated_rendering
+                &settings.video.foveated_rendering
             {
                 foveation_vars.shape
             } else {
                 1_f32
             },
             foveationVerticalOffset: if let Switch::Enabled(foveation_vars) =
-                &baseline_settings.video.foveated_rendering
+                &settings.video.foveated_rendering
             {
                 foveation_vars.vertical_offset
             } else {
                 0_f32
             },
-            trackingSpaceType: matches!(
-                baseline_settings.headset.tracking_space,
-                TrackingSpace::Stage
-            ) as _,
-            extraLatencyMode: baseline_settings.headset.extra_latency_mode,
+            trackingSpaceType: matches!(settings.headset.tracking_space, TrackingSpace::Stage) as _,
+            extraLatencyMode: settings.headset.extra_latency_mode,
         });
     }
 
@@ -200,19 +236,16 @@ async fn connection_pipeline(
         "onServerConnected",
         "(IZLjava/lang/String;)V",
         &[
-            (matches!(baseline_settings.video.codec, CodecType::HEVC) as i32).into(),
-            baseline_settings
-                .video
-                .client_request_realtime_decoder
-                .into(),
+            (matches!(settings.video.codec, CodecType::HEVC) as i32).into(),
+            settings.video.client_request_realtime_decoder.into(),
             trace_err!(trace_err!(java_vm.attach_current_thread())?
                 .new_string(config_packet.dashboard_url))?
             .into()
         ],
     ))?;
 
-    let tracking_clientside_prediction = match baseline_settings.headset.controllers {
-        Switch::Enabled(ref controllers) => controllers.clientside_prediction,
+    let tracking_clientside_prediction = match &settings.headset.controllers {
+        Switch::Enabled(controllers) => controllers.clientside_prediction,
         Switch::Disabled => false,
     };
 
@@ -222,13 +255,13 @@ async fn connection_pipeline(
     // many times per second. If using a future I'm forced to attach and detach the env continuously.
     // When the parent function gets canceled, this loop will run to finish.
     let server_ip_cstring = CString::new(server_ip.to_string()).unwrap();
-    let stream_socket_loop = task::spawn_blocking({
+    let legacy_stream_socket_loop = task::spawn_blocking({
         let java_vm = java_vm.clone();
         let activity_ref = activity_ref.clone();
         let nal_class_ref = nal_class_ref.clone();
-        let codec = baseline_settings.video.codec;
-        let client_recv_buffer_size = baseline_settings.connection.client_recv_buffer_size;
-        let enable_fec = baseline_settings.connection.enable_fec;
+        let codec = settings.video.codec;
+        let client_recv_buffer_size = settings.connection.client_recv_buffer_size;
+        let enable_fec = settings.connection.enable_fec;
         move || -> StrResult {
             let env = trace_err!(java_vm.attach_current_thread())?;
             let env_ptr = env.get_native_interface() as _;
@@ -317,29 +350,23 @@ async fn connection_pipeline(
         }
     };
 
-    let mut maybe_game_audio_config = None;
-    if let Ok(reserved_config) = json::from_str::<json::Value>(&config_packet.reserved) {
-        if let Some(config_json) = reserved_config.get("game_audio_config") {
-            if let Ok(maybe_config) = json::from_value::<Option<AudioConfig>>(config_json.clone()) {
-                maybe_game_audio_config = maybe_config;
-            }
-        }
-    }
+    let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.game_audio {
+        let game_audio_receiver = stream_socket.subscribe_to_stream(AUDIO).await?;
+        Box::pin(audio::play_audio_loop(
+            config_packet.game_audio_sample_rate,
+            desc.buffer_range_multiplier,
+            game_audio_receiver,
+        ))
+    } else {
+        Box::pin(future::pending())
+    };
 
-    let (game_audio_sender, game_audio_receiver) = smpsc::channel();
-    let (_destroy_game_audio_stream_notifier, destroy_game_audio_stream_receiver) =
-        smpsc::channel::<()>();
-
-    // AudioPlayer is !Send, so put it in a separate thread
-    let game_audio_stream: BoxFuture<_> = if let Some(config) = maybe_game_audio_config {
-        Box::pin(task::spawn_blocking(move || {
-            let mut _stream_guard = audio::AudioPlayer::start(config, game_audio_receiver)?;
-
-            // notified when the notifier counterpart gets dropped
-            destroy_game_audio_stream_receiver.recv().ok();
-
-            Ok(())
-        }))
+    let microphone_loop: BoxFuture<_> = if matches!(settings.audio.microphone, Switch::Enabled(_)) {
+        let microphone_sender = stream_socket.request_stream(AUDIO).await?;
+        Box::pin(audio::record_audio_loop(
+            config_packet.microphone_sample_rate,
+            microphone_sender,
+        ))
     } else {
         Box::pin(future::pending())
     };
@@ -351,9 +378,7 @@ async fn connection_pipeline(
                 control_sender
                     .lock()
                     .await
-                    .send(&ClientControlPacket::Reserved(
-                        "{ \"keepalive\": true }".into(),
-                    ))
+                    .send(&ClientControlPacket::KeepAlive)
                     .await
                     .ok();
                 time::sleep(NETWORK_KEEPALIVE_INTERVAL).await;
@@ -380,10 +405,7 @@ async fn connection_pipeline(
                             .await?;
                             break Ok(());
                         }
-                        Ok(ServerControlPacket::ReservedBuffer(buffer)) => {
-                            trace_err!(game_audio_sender.send(buffer))?;
-                        },
-                        Ok(ServerControlPacket::Reserved(_)) => (),
+                        Ok(_) => (),
                         Err(e) => {
                             info!("Server disconnected. Cause: {}", e);
                             set_loading_message(
@@ -401,12 +423,14 @@ async fn connection_pipeline(
     };
 
     tokio::select! {
-        res = game_audio_stream => trace_err!(res)?,
-        res = stream_socket_loop => trace_err!(res)?,
+        res = legacy_stream_socket_loop => trace_err!(res)?,
+        res = stream_socket.receive_loop() => res,
+        res = game_audio_loop => res,
+        res = microphone_loop => res,
         res = tracking_loop => res,
         res = playspace_sync_loop => res,
-        res = control_loop => res,
         res = keepalive_sender_loop => res,
+        res = control_loop => res,
     }
 }
 
@@ -442,13 +466,20 @@ pub async fn connection_lifecycle_loop(
                 .await;
 
                 if let Err(e) = maybe_error {
-                    error!("{}", e);
-                    set_loading_message(&*java_vm, &*activity_ref, &private_identity.hostname, &e)
-                        .await
-                        .ok();
+                    let message =
+                        format!("Connection error:\n{}\nCheck the PC for more details", e);
+                    error!("{}", message);
+                    set_loading_message(
+                        &*java_vm,
+                        &*activity_ref,
+                        &private_identity.hostname,
+                        &message,
+                    )
+                    .await
+                    .ok();
                 }
             },
-            time::sleep(RETRY_CONNECT_INTERVAL),
+            time::sleep(RETRY_CONNECT_MIN_INTERVAL),
         );
     }
 }

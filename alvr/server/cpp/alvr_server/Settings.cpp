@@ -1,7 +1,6 @@
 #include "Settings.h"
 #include "Logger.h"
 #include "ipctools.h"
-#include "resource.h"
 #define PICOJSON_USE_INT64
 #include <picojson.h>
 #include <string>
@@ -69,9 +68,6 @@ void Settings::Load()
 			m_eyeFov[eye].top = 45;
 			m_eyeFov[eye].bottom = 45;
 		}
-
-		m_streamMic = config.get("enable_microphone").get<bool>();
-		m_microphoneDevice = config.get("microphone_device").get<std::string>();
 
 		m_flSecondsFromVsyncToPhotons = (float)config.get("seconds_from_vsync_to_photons").get<double>();
 
