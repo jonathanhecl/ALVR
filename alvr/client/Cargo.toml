@@ -1,6 +1,6 @@
 [package]
 name = "alvr_client"
-version = "14.2.0-beta.1"
+version = "14.2.1"
 authors = ["alvr-org", "Riccardo Zaglia <riccardo.zaglia5@gmail.com>"]
 license = "MIT"
 edition = "2018"
@@ -22,11 +22,12 @@ settings-schema = { path = "../settings-schema" }
 alvr_common = { path = "../common" }
 nalgebra = "0.24"
 futures = "0.3"
+bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 rand = "0.8"
 
 # todo: move to target_os = "android"
-jni = "0.18"
+jni = "0.19"
 
 # todo: use CPAL when moving the entry point to Rust
 oboe = "0.4" # Note: cannot use feature "java-interface" to query audio info
@@ -37,4 +38,4 @@ android_logger = "0.9"
 [build-dependencies]
 walkdir = "2"
 cc = { version = "1", features = ["parallel"] }
-bindgen = "0.56"
+bindgen = "0.57"
