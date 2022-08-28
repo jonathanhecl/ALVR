@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#include "ipctools.h"
+#include <mutex>
 #include "Settings.h"
 
 class IDRScheduler
@@ -21,7 +21,6 @@ private:
 	static const int MIN_IDR_FRAME_INTERVAL_AGGRESSIVE = 5 * 1000; // 5-milliseconds (less than screen refresh interval)
 	uint64_t m_insertIDRTime = 0;
 	bool m_scheduled = false;
-	IPCCriticalSection m_IDRCS;
-	int m_minIDRFrameInterval = MIN_IDR_FRAME_INTERVAL;
+	std::mutex m_mutex;
+	uint64_t m_minIDRFrameInterval = MIN_IDR_FRAME_INTERVAL;
 };
-

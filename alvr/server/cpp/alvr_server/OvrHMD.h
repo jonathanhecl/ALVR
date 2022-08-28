@@ -1,94 +1,97 @@
 #pragma once
-#include <d3d11_1.h>
-#include <wincodec.h>
-#include <wincodecsdk.h>
 
+#include "ALVR-common/packet_types.h"
+#include "TrackedDevice.h"
 #include "openvr_driver.h"
-#include "sharedstate.h"
-#include "Logger.h"
-#include "ClientConnection.h"
-#include "Utils.h"
-#include "FrameRender.h"
-#include "Settings.h"
+#include <memory>
+#ifdef _WIN32
+#include "platform/win32/OvrDirectModeComponent.h"
+#endif
 
-#include "packet_types.h"
-#include "VideoEncoder.h"
-#include "VideoEncoderNVENC.h"
-#include "VideoEncoderVCE.h"
-#include "IDRScheduler.h"
-#include "CEncoder.h"
-#include "VSyncThread.h"
-#include "OvrDisplayComponent.h"
-#include "OvrDirectModeComponent.h"
-#include "OvrController.h"
+class ClientConnection;
+class VSyncThread;
 
-//-----------------------------------------------------------------------------
-// Purpose:
-//-----------------------------------------------------------------------------
-class OvrHmd : public vr::ITrackedDeviceServerDriver
-{
-public:
-	OvrHmd();
+class OvrController;
+class OvrController;
+class OvrViveTrackerProxy;
 
-	virtual ~OvrHmd();
+class CEncoder;
+#ifdef _WIN32
+class CD3DRender;
+#endif
+class PoseHistory;
 
-	std::string GetSerialNumber() const { return Settings::Instance().mSerialNumber; }
+class OvrHmd : public TrackedDevice,
+               public vr::ITrackedDeviceServerDriver,
+               vr::IVRDisplayComponent {
+  public:
+    OvrHmd();
 
-	virtual vr::EVRInitError Activate(vr::TrackedDeviceIndex_t unObjectId);
+    virtual ~OvrHmd();
 
-	virtual void Deactivate();
-	virtual void EnterStandby();
+    std::string GetSerialNumber() const;
 
-	void *GetComponent(const char *pchComponentNameAndVersion);
+    virtual vr::EVRInitError Activate(vr::TrackedDeviceIndex_t unObjectId);
+    virtual void Deactivate();
+    virtual void EnterStandby() {}
+    void *GetComponent(const char *pchComponentNameAndVersion);
+    virtual void DebugRequest(const char *request, char *response_buffer, uint32_t size) {}
+    virtual vr::DriverPose_t GetPose();
 
-	/** debug request from a client */
-	virtual void DebugRequest(const char *pchRequest, char *pchResponseBuffer, uint32_t unResponseBufferSize);
+    void OnPoseUpdated(uint64_t targetTimestampNs, float predictionS, AlvrDeviceMotion motion);
 
-	virtual vr::DriverPose_t GetPose();
+    void StartStreaming();
 
+    void OnStreamStart();
 
-	void RunFrame();
+    void SetViewsConfig(ViewsConfigData config);
 
-	void OnPoseUpdated();
+    bool IsTrackingRef() const { return m_deviceClass == vr::TrackedDeviceClass_TrackingReference; }
+    bool IsHMD() const { return m_deviceClass == vr::TrackedDeviceClass_HMD; }
 
-	void StartStreaming();
+    // IVRDisplayComponent
 
-	void StopStreaming();
+    virtual void GetWindowBounds(int32_t *x, int32_t *y, uint32_t *width, uint32_t *height);
+    virtual bool IsDisplayOnDesktop() { return false; }
+    virtual bool IsDisplayRealDisplay();
+    virtual void GetRecommendedRenderTargetSize(uint32_t *width, uint32_t *height);
+    virtual void GetEyeOutputViewport(
+        vr::EVREye eye, uint32_t *x, uint32_t *y, uint32_t *width, uint32_t *height);
+    virtual void
+    GetProjectionRaw(vr::EVREye eEye, float *pfLeft, float *pfRight, float *pfTop, float *pfBottom);
+    virtual vr::DistortionCoordinates_t ComputeDistortion(vr::EVREye eEye, float fU, float fV);
 
-	void OnStreamStart();
+    std::shared_ptr<ClientConnection> m_Listener;
 
-	void OnPacketLoss();
+    std::shared_ptr<OvrController> m_leftController;
+    std::shared_ptr<OvrController> m_rightController;
 
-	void OnShutdown();
+    std::shared_ptr<CEncoder> m_encoder;
+  private:
+    ViewsConfigData views_config;
 
-	void RequestIDR();
+    bool m_baseComponentsInitialized;
+    bool m_streamComponentsInitialized;
+    vr::ETrackedDeviceClass m_deviceClass;
 
+    vr::HmdMatrix34_t m_eyeToHeadLeft;
+    vr::HmdMatrix34_t m_eyeToHeadRight;
+    vr::HmdRect2_t m_eyeFoVLeft;
+    vr::HmdRect2_t m_eyeFoVRight;
 
-	void updateController(const TrackingInfo& info);
+    std::wstring m_adapterName;
 
-	void updateIPDandFoV(const TrackingInfo& info);
+#ifdef _WIN32
+    std::shared_ptr<CD3DRender> m_D3DRender;
+#endif
+    std::shared_ptr<VSyncThread> m_VSyncThread;
 
-private:
-	bool m_baseComponentsInitialized;
-	bool m_streamComponentsInitialized;
-	vr::TrackedDeviceIndex_t m_unObjectId;
-	vr::PropertyContainerHandle_t m_ulPropertyContainer;
-	
-	vr::HmdMatrix34_t m_eyeToHeadLeft;
-	vr::HmdMatrix34_t m_eyeToHeadRight;
-	vr::HmdRect2_t m_eyeFoVLeft;
-	vr::HmdRect2_t m_eyeFoVRight;
+#ifdef _WIN32
+    std::shared_ptr<OvrDirectModeComponent> m_directModeComponent;
+#endif
+    std::shared_ptr<PoseHistory> m_poseHistory;
 
-	std::wstring m_adapterName;
+    std::shared_ptr<OvrViveTrackerProxy> m_viveTrackerProxy;
 
-	std::shared_ptr<CD3DRender> m_D3DRender;
-	std::shared_ptr<CEncoder> m_encoder;
-	std::shared_ptr<ClientConnection> m_Listener;
-	std::shared_ptr<VSyncThread> m_VSyncThread;
-
-	std::shared_ptr<OvrController> m_leftController;
-	std::shared_ptr<OvrController> m_rightController;
-
-	std::shared_ptr<OvrDisplayComponent> m_displayComponent;
-	std::shared_ptr<OvrDirectModeComponent> m_directModeComponent;
+    vr::DriverPose_t m_pose = {};
 };

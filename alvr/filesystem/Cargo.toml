@@ -1,0 +1,11 @@
+[package]
+name = "alvr_filesystem"
+version = "19.0.0-dev00"
+authors = ["alvr-org", "Patrick Nicolas <patricknicolas@laposte.net>"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.58"
+
+[dependencies]
+dirs = "4"
+once_cell = "1"

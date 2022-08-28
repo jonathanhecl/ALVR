@@ -48,14 +48,18 @@ wix/harvested.wxs
 
 # build result
 /build/
+dist
 
 .vscode/
 .DS_Store
+.ccls-cache
 
 # dependencies installed by xtask
-# /deps/
+deps
 
 # dependencies installed by node
 node_modules
 
 # The .gitignore for android is project folder.
+
+alvr_launcher_mutex

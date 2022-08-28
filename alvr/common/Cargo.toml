@@ -1,47 +1,18 @@
 [package]
 name = "alvr_common"
-version = "14.2.1"
+version = "19.0.0-dev00"
 authors = ["alvr-org", "Riccardo Zaglia <riccardo.zaglia5@gmail.com>"]
 license = "MIT"
-edition = "2018"
-
-[features]
-default = []
-nightly = []
+edition = "2021"
+rust-version = "1.58"
 
 [dependencies]
-lazy_static = "1"
-semver = { version = "0.11", features = ['serde'] }
-log = "0.4"
 backtrace = "0.3"
-rand = "0.8"
-nalgebra = { version = "0.24", features = ["serde-serialize"] }
-settings-schema = { path = "../settings-schema", features = ["rename_camel_case"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-bincode = "1"
-encoding_rs_io = "0.1"
-futures = "0.3"
-bytes = "1"
-tokio = { version = "1", features = ["net", "macros"] }
-tokio-util = { version = "0.6", features = ["codec", "net"] }
-rcgen = "0.8"
-gfx-hal = "=0.6.0"
-winit = "0.24" # needed to get the screen size
-cpal = "0.13"
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-dirs = "3"
-runas = "0.2"
-msgbox = "0.6"
+glam = { version = "0.21", features = ["serde"] }
+log = "0.4"
+once_cell = "1"
+parking_lot = "0.12"
+semver = { version = "1", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["mmdeviceapi", "objbase", "endpointvolume"] }
-wio = "0.2"
-gfx-backend-dx11 = "=0.6.17"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gfx-backend-vulkan = "=0.6.5"
-
-[build-dependencies]
-alvr_xtask = { path = "../xtask" }
+msgbox = "0.7"

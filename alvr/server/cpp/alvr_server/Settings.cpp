@@ -1,11 +1,13 @@
 #include "Settings.h"
 #include "Logger.h"
-#include "ipctools.h"
 #define PICOJSON_USE_INT64
-#include <picojson.h>
+#include "include/picojson.h"
 #include <string>
 #include <fstream>
 #include <streambuf>
+#include <filesystem>
+#include <cstdlib>
+#include "bindings.h"
 
 using namespace std;
 
@@ -14,7 +16,7 @@ extern uint64_t g_DriverTestMode;
 Settings Settings::m_Instance;
 
 Settings::Settings()
-	: m_EnableOffsetPos(false), m_loaded(false)
+	: m_loaded(false), m_EnableOffsetPos(false)
 {
 	m_OffsetPos[0] = 0.0f;
 	m_OffsetPos[1] = 0.0f;
@@ -29,7 +31,7 @@ void Settings::Load()
 {
 	try
 	{
-		auto sessionFile = std::ifstream(g_alvrDir + "/session.json"s);
+		auto sessionFile = std::ifstream(g_sessionPath);
 
 		auto json = std::string(
 			std::istreambuf_iterator<char>(sessionFile),
@@ -43,7 +45,7 @@ void Settings::Load()
 			return;
 		}
 
-		auto config = v.get("openvrConfig");
+		auto config = v.get("openvr_config");
 
 		m_universeId = config.get("universe_id").get<int64_t>();
 
@@ -73,9 +75,10 @@ void Settings::Load()
 
 		m_flIPD = 0.063;
 
-		m_clientRecvBufferSize = (uint32_t)config.get("client_buffer_size").get<int64_t>();
+		m_force3DOF = config.get("force_3dof").get<bool>();		
+		m_TrackingRefOnly = config.get("tracking_ref_only").get<bool>();
 
-		m_force3DOF = config.get("force_3dof").get<bool>();
+		m_enableViveTrackerProxy = config.get("enable_vive_tracker_proxy").get<bool>();
 
 		m_aggressiveKeyframeResend = config.get("aggressive_keyframe_resend").get<bool>();
 
@@ -83,14 +86,20 @@ void Settings::Load()
 
 		m_codec = (int32_t)config.get("codec").get<int64_t>();
 		m_refreshRate = (int)config.get("refresh_rate").get<int64_t>();
-		mEncodeBitrate = Bitrate::fromMiBits((int)config.get("encode_bitrate_mbs").get<int64_t>());
-
-		mThrottlingBitrate = Bitrate::fromBits((int)config.get("throttling_bitrate_bits").get<int64_t>());
-
-		// Listener Parameters
-		m_Port = (int)config.get("listen_port").get<int64_t>();
-
-		m_ConnectedClient = config.get("client_address").get<std::string>();
+		mEncodeBitrateMBs = (int)config.get("encode_bitrate_mbs").get<int64_t>();
+		m_enableAdaptiveBitrate = config.get("enable_adaptive_bitrate").get<bool>();
+		m_adaptiveBitrateMaximum = (int)config.get("bitrate_maximum").get<int64_t>();
+		m_adaptiveBitrateTarget = (int)config.get("latency_target").get<int64_t>();
+		m_adaptiveBitrateUseFrametime = config.get("latency_use_frametime").get<bool>();
+		m_adaptiveBitrateTargetMaximum = (int)config.get("latency_target_maximum").get<int64_t>();
+		m_adaptiveBitrateTargetOffset = (int)config.get("latency_target_offset").get<int64_t>();
+		m_adaptiveBitrateThreshold = (int)config.get("latency_threshold").get<int64_t>();
+		m_adaptiveBitrateUpRate = (int)config.get("bitrate_up_rate").get<int64_t>();
+		m_adaptiveBitrateDownRate = (int)config.get("bitrate_down_rate").get<int64_t>();
+		m_adaptiveBitrateLightLoadThreshold = config.get("bitrate_light_load_threshold").get<double>();
+		m_use10bitEncoder = config.get("use_10bit_encoder").get<bool>();
+		m_force_sw_encoding = config.get("force_sw_encoding").get<bool>();
+		m_swThreadCount = (int32_t)config.get("sw_thread_count").get<int64_t>();
 
 		m_controllerTrackingSystemName = config.get("controllers_tracking_system_name").get<std::string>();
 		m_controllerManufacturerName = config.get("controllers_manufacturer_name").get<std::string>();
@@ -98,7 +107,8 @@ void Settings::Load()
 		m_controllerRenderModelNameLeft = config.get("render_model_name_left_controller").get<std::string>();
 		m_controllerRenderModelNameRight = config.get("render_model_name_right_controller").get<std::string>();
 		m_controllerSerialNumber = config.get("controllers_serial_number").get<std::string>();
-		m_controllerType = config.get("controllers_type").get<std::string>();
+		m_controllerTypeLeft = config.get("controllers_type_left").get<std::string>();
+		m_controllerTypeRight = config.get("controllers_type_right").get<std::string>();
 		mControllerRegisteredDeviceType = config.get("controllers_registered_device_type").get<std::string>();
 		m_controllerInputProfilePath = config.get("controllers_input_profile_path").get<std::string>();
 
@@ -112,8 +122,8 @@ void Settings::Load()
 		m_OffsetPos[1] = (float)headsetPositionOffset[1].get<double>();
 		m_OffsetPos[2] = (float)headsetPositionOffset[2].get<double>();
 
-		m_trackingFrameOffset = (int32_t)config.get("tracking_frame_offset").get<int64_t>();
-		m_controllerPoseOffset = (double)config.get("controller_pose_offset").get<double>();
+		m_linearVelocityCutoff = (float)config.get("linear_velocity_cutoff").get<double>();
+		m_angularVelocityCutoff = (float)config.get("angular_velocity_cutoff").get<double>();
 
 		auto leftControllerPositionOffset = config.get("position_offset_left").get<picojson::array>();
 		m_leftControllerPositionOffset[0] = leftControllerPositionOffset[0].get<double>();
@@ -126,11 +136,20 @@ void Settings::Load()
 		m_leftControllerRotationOffset[2] = leftControllerRotationOffset[2].get<double>();
 
 		m_hapticsIntensity = config.get("haptics_intensity").get<double>();
+		m_hapticsAmplitudeCurve = config.get("haptics_amplitude_curve").get<double>();
+		m_hapticsMinDuration = config.get("haptics_min_duration").get<double>();
+		m_hapticsLowDurationAmplitudeMultiplier = config.get("haptics_low_duration_amplitude_multiplier").get<double>();
+		m_hapticsLowDurationRange = config.get("haptics_low_duration_range").get<double>();
+
+		m_useHeadsetTrackingSystem = config.get("use_headset_tracking_system").get<bool>();
 
 		m_enableFoveatedRendering = config.get("enable_foveated_rendering").get<bool>();
-		m_foveationStrength = (float)config.get("foveation_strength").get<double>();
-		m_foveationShape = (float)config.get("foveation_shape").get<double>();
-		m_foveationVerticalOffset = (float)config.get("foveation_vertical_offset").get<double>();
+		m_foveationCenterSizeX = (float)config.get("foveation_center_size_x").get<double>();
+		m_foveationCenterSizeY = (float)config.get("foveation_center_size_y").get<double>();
+		m_foveationCenterShiftX = (float)config.get("foveation_center_shift_x").get<double>();
+		m_foveationCenterShiftY = (float)config.get("foveation_center_shift_y").get<double>();
+		m_foveationEdgeRatioX = (float)config.get("foveation_edge_ratio_x").get<double>();
+		m_foveationEdgeRatioY = (float)config.get("foveation_edge_ratio_y").get<double>();
 
 		m_enableColorCorrection = config.get("enable_color_correction").get<bool>();
 		m_brightness = (float)config.get("brightness").get<double>();
@@ -139,16 +158,16 @@ void Settings::Load()
 		m_gamma = (float)config.get("gamma").get<double>();
 		m_sharpening = (float)config.get("sharpening").get<double>();
 
+		m_enableFec = config.get("enable_fec").get<bool>();
+
+		m_enableLinuxVulkanAsync = config.get("linux_async_reprojection").get<bool>();
+		
 		Debug("Config JSON: %hs\n", json.c_str());
 		Info("Serial Number: %hs\n", mSerialNumber.c_str());
 		Info("Model Number: %hs\n", mModelNumber.c_str());
 		Info("Render Target: %d %d\n", m_renderWidth, m_renderHeight);
 		Info("Seconds from Vsync to Photons: %f\n", m_flSecondsFromVsyncToPhotons);
 		Info("Refresh Rate: %d\n", m_refreshRate);
-		Info("IPD: %f\n", m_flIPD);
-
-		Info("EncoderOptions: %hs\n", m_EncoderOptions.c_str());
-
 		m_loaded = true;
 	}
 	catch (std::exception &e)

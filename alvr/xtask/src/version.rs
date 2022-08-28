@@ -1,80 +1,141 @@
-use crate::*;
+use crate::command;
+use alvr_filesystem as afs;
+use std::{error::Error, fs, path::Path};
+use xshell::Shell;
 
-use chrono::Utc;
-use lazy_static::lazy_static;
-use regex::{Captures, Regex};
-use semver::{Identifier, Version};
+pub fn split_string(source: &str, start_pattern: &str, end: char) -> (String, String, String) {
+    let start_idx = source.find(start_pattern).unwrap() + start_pattern.len();
+    let end_idx = start_idx + source[start_idx..].find(end).unwrap();
 
-lazy_static! {
-    static ref GRADLE_VERSIONNAME_REGEX: Regex =
-        Regex::new(r#"versionName\s+"[\d.]+[0-9A-Za-z-.]*(?:\+[0-9A-Za-z-.]+){0,1}""#).unwrap();
-    static ref GRADLE_VERSIONCODE_REGEX: Regex =
-        Regex::new(r#"versionCode\s+(?P<code>\d+)"#).unwrap();
+    (
+        source[..start_idx].to_owned(),
+        source[start_idx..end_idx].to_owned(),
+        source[end_idx..].to_owned(),
+    )
 }
 
-fn bump_client_gradle_version(new_version: &Version, is_nightly: bool) {
-    let old_version = alvr_xtask::version();
+pub fn version() -> String {
+    let manifest_path = afs::crate_dir("common").join("Cargo.toml");
+    println!("cargo:rerun-if-changed={}", manifest_path.to_string_lossy());
 
-    println!(
-        "Bumping client version (gradle): {} -> {}",
-        old_version, new_version
-    );
+    let manifest = fs::read_to_string(manifest_path).unwrap();
+    let (_, version, _) = split_string(&manifest, "version = \"", '\"');
 
-    let gradle_file_path = workspace_dir()
-        .join("alvr/client/android/app")
-        .join("build.gradle");
-    let file_content = fs::read_to_string(&gradle_file_path).unwrap();
+    version
+}
 
-    let file_content = GRADLE_VERSIONNAME_REGEX.replace(&file_content, |_: &Captures| {
-        format!(r#"versionName "{}""#, new_version)
-    });
+fn bump_client_gradle_version(
+    android_project_root: &Path,
+    new_version: &str,
+    is_nightly: bool,
+) -> Result<(), Box<dyn Error>> {
+    let gradle_file_path = android_project_root.join("app/build.gradle");
+    let file_content = fs::read_to_string(&gradle_file_path)?;
+
+    // Replace versionName
+    let (file_start, _, file_end) = split_string(&file_content, "versionName \"", '\"');
+    let file_content = format!("{file_start}{new_version}{file_end}");
+
     let file_content = if !is_nightly {
-        GRADLE_VERSIONCODE_REGEX.replace(&file_content, |caps: &Captures| {
-            let code: u32 = (&caps["code"]).parse().unwrap();
-            format!("versionCode {}", code + 1)
-        })
+        // Replace versionCode
+        let (file_start, old_version_code_string, file_end) =
+            split_string(&file_content, "versionCode ", '\n');
+        format!(
+            "{file_start}{}{file_end}",
+            old_version_code_string.parse::<usize>().unwrap() + 1,
+        )
     } else {
         file_content
     };
 
-    fs::write(gradle_file_path, file_content.as_ref()).unwrap();
+    fs::write(gradle_file_path, file_content)?;
+
+    Ok(())
 }
 
-fn bump_cargo_version(crate_dir_name: &str, new_version: &Version) {
-    let manifest_path = workspace_dir()
-        .join("alvr")
-        .join(crate_dir_name)
-        .join("Cargo.toml");
+fn bump_cargo_version(crate_dir_name: &str, new_version: &str) {
+    let manifest_path = afs::crate_dir(crate_dir_name).join("Cargo.toml");
 
-    let mut manifest: toml_edit::Document =
-        fs::read_to_string(&manifest_path).unwrap().parse().unwrap();
+    dbg!(&manifest_path);
 
-    manifest["package"]["version"] = toml_edit::value(new_version.to_string());
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
 
-    fs::write(manifest_path, manifest.to_string_in_original_order()).unwrap();
+    let (file_start, _, file_end) = split_string(&manifest, "version = \"", '\"');
+    let manifest = format!("{file_start}{new_version}{file_end}");
+
+    fs::write(manifest_path, manifest).unwrap();
 }
 
-pub fn bump_version(version_arg: Option<&str>, is_nightly: bool) {
-    let mut version = if let Some(version_arg) = version_arg {
-        Version::parse(version_arg).unwrap()
-    } else {
-        let mut version = Version::parse(&alvr_xtask::version()).unwrap();
-        if !is_nightly {
-            version.increment_patch();
+fn bump_rpm_spec_version(new_version: &str, is_nightly: bool) {
+    let spec_path = afs::workspace_dir().join("packaging/rpm/alvr.spec");
+    let spec = fs::read_to_string(&spec_path).unwrap();
+
+    // If there's a '-', split the version around it
+    let (version_start, version_end) = {
+        if new_version.contains('-') {
+            let (_, tmp_start, mut tmp_end) = split_string(new_version, "", '-');
+            tmp_end.remove(0);
+            (tmp_start, format!("0.0.1{tmp_end}"))
+        } else {
+            (new_version.to_string(), "1.0.0".to_string())
         }
-        version
     };
 
+    // Replace Version
+    let (file_start, _, file_end) = split_string(&spec, "Version: ", '\n');
+    let spec = format!("{file_start}{version_start}{file_end}");
+
+    // Reset Release to 1.0.0
+    let (file_start, _, file_end) = split_string(&spec, "Release: ", '\n');
+    let spec = format!("{file_start}{version_end}{file_end}");
+
+    // Replace Source in github URL
+    let spec = {
+        if is_nightly {
+            spec
+        } else {
+            // Grab version (ex: https://github.com/alvr-org/ALVR/archive/refs/tags/v16.0.0-rc1.tar.gz)
+            let (file_start, _, file_end) = split_string(&spec, "refs/tags/v", 't');
+            format!("{file_start}{new_version}.{file_end}")
+        }
+    };
+
+    fs::write(spec_path, spec).unwrap();
+}
+
+fn bump_deb_control_version(new_version: &str) {
+    let control_path = afs::workspace_dir().join("packaging/deb/control");
+    let control = fs::read_to_string(&control_path).unwrap();
+
+    // Replace Version
+    let (file_start, _, file_end) = split_string(&control, "\nVersion: ", '\n');
+    let control = format!("{file_start}{new_version}{file_end}");
+
+    fs::write(control_path, control).unwrap();
+}
+
+pub fn bump_version(maybe_version: Option<String>, is_nightly: bool) {
+    let sh = Shell::new().unwrap();
+
+    let mut version = maybe_version.unwrap_or_else(version);
+
     if is_nightly {
-        let today = Utc::now().format("%Y%m%d");
-        version.build = vec![Identifier::AlphaNumeric(format!("nightly.{}", today))];
+        version = format!(
+            "{version}+nightly.{}",
+            command::date_utc_yyyymmdd(&sh).unwrap()
+        );
     }
 
-    bump_client_gradle_version(&version, is_nightly);
-    bump_cargo_version("common", &version);
-    bump_cargo_version("server", &version);
-    bump_cargo_version("launcher", &version);
-    bump_cargo_version("client", &version);
+    for dir_name in crate::crate_dir_names() {
+        bump_cargo_version(&dir_name, &version);
+    }
+    bump_client_gradle_version(&afs::workspace_dir().join("android"), &version, is_nightly)
+        .unwrap();
+    bump_rpm_spec_version(&version, is_nightly);
+    bump_deb_control_version(&version);
 
-    println!("Git tag:\nv{}", version);
+    // This is for when the repository is loaded as a submodule. Allow failure
+    bump_client_gradle_version(afs::workspace_dir().parent().unwrap(), &version, is_nightly).ok();
+
+    println!("Git tag:\nv{version}");
 }

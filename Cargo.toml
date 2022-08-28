@@ -1,10 +1,9 @@
 [workspace]
+resolver = "2"
 members = [
-    "alvr/settings-schema-derive",
-    "alvr/settings-schema",
-    "alvr/xtask",
-    "alvr/common",
-    "alvr/client",
-    "alvr/server",
-    "alvr/launcher",
+    "alvr/*",
+    # "experiments/*"
 ]
+
+[patch.crates-io]
+cpal = { git = "https://github.com/RustAudio/cpal" }

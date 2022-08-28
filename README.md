@@ -2,7 +2,7 @@
 
 # ALVR - Air Light VR
 
-[![badge-discord][]][link-discord] [![badge-opencollective][]][link-opencollective]
+[![badge-discord][]][link-discord] [![badge-matrix][]][link-matrix] [![badge-opencollective][]][link-opencollective]
 
 Stream VR games from your PC to your headset via Wi-Fi.  
 ALVR uses technologies like [Asynchronous Timewarp](https://developer.oculus.com/documentation/native/android/mobile-timewarp-overview) and [Fixed Foveated Rendering](https://developer.oculus.com/documentation/native/android/mobile-ffr) for a smoother experience.  
@@ -13,7 +13,7 @@ This is a fork of [ALVR](https://github.com/polygraphene/ALVR).
 | :------------: | :----------------------------------------------------: |
 |  Oculus Quest  |                   :heavy_check_mark:                   |
 | Oculus Quest 2 |                   :heavy_check_mark:                   |
-|   Oculus Go    |           :heavy_check_mark: (no controller)           |
+|   Oculus Go    |                   :heavy_check_mark:                   |
 |     GearVR     | :x: (use [this](https://github.com/polygraphene/ALVR)) |
 
 ## Requirements
@@ -36,14 +36,10 @@ This is a fork of [ALVR](https://github.com/polygraphene/ALVR).
 
 Follow the installation guide [here](https://github.com/alvr-org/ALVR/wiki/Installation).
 
-## Usage
-
-Follow the guide [here](https://github.com/alvr-org/ALVR/wiki/Usage).
-
 ## Troubleshooting
 
 -   Please check the [Troubleshooting](https://github.com/alvr-org/ALVR/wiki/Troubleshooting) page. The original repository [wiki](https://github.com/polygraphene/ALVR/wiki/Troubleshooting) can also help.  
--   You can find some setup advice [here](https://github.com/alvr-org/ALVR/wiki/Setup-advice).
+-   Configuration recommendations and information may be found [here](https://github.com/alvr-org/ALVR/wiki/Configuration-Information-and-Recommendations)
 
 ## Uninstall
 
@@ -53,7 +49,7 @@ If you have a version prior to v12.0 you need to launch `remove_firewall_rules.b
 
 ## Build from source
 
-You can follow the guide [here](https://github.com/alvr-org/ALVR/wiki/Build-from-source)
+You can follow the guide [here](https://github.com/alvr-org/ALVR/wiki/Building-From-Source).
 
 ## License
 
@@ -69,7 +65,9 @@ If you want to support this project you can make a donation to our [Open Source 
 
 You can also donate to the original author of ALVR using Paypal (polygraphene@gmail.com) or with bitcoin (1FCbmFVSjsmpnAj6oLx2EhnzQzzhyxTLEv).
 
-[badge-discord]: https://img.shields.io/discord/720612397580025886?style=for-the-badge&logo=discord "Join us on Discord"
-[link-discord]: https://discord.gg/KbKk3UM
-[badge-opencollective]: https://img.shields.io/opencollective/all/alvr?style=for-the-badge "Donate"
+[badge-discord]: https://img.shields.io/discord/720612397580025886?style=for-the-badge&logo=discord&color=5865F2 "Join us on Discord"
+[link-discord]: https://discord.gg/ALVR
+[badge-matrix]: https://img.shields.io/static/v1?label=chat&message=%23alvr&style=for-the-badge&logo=matrix&color=blueviolet "Join us on Matrix"
+[link-matrix]: https://matrix.to/#/#alvr:ckie.dev?via=ckie.dev
+[badge-opencollective]: https://img.shields.io/opencollective/all/alvr?style=for-the-badge&logo=opencollective&color=79a3e6 "Donate"
 [link-opencollective]: https://opencollective.com/alvr

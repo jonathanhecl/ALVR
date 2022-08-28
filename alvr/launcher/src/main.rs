@@ -2,9 +2,15 @@
 
 mod commands;
 
-use alvr_common::{logging::*, *};
-use commands::*;
-use druid::{commands::CLOSE_WINDOW, widget::*, Data, *};
+use alvr_common::prelude::*;
+use alvr_filesystem as afs;
+use druid::{
+    commands::CLOSE_WINDOW,
+    theme,
+    widget::{Button, CrossAxisAlignment, Flex, FlexParams, Label, LineBreaking, ViewSwitcher},
+    AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, Env, ExtEventSink, FontDescriptor,
+    Handled, Screen, Selector, Target, Widget, WindowDesc, WindowId,
+};
 use std::{env, thread, time::Duration};
 
 const WINDOW_WIDTH: f64 = 500.0;
@@ -20,23 +26,20 @@ enum View {
 
 fn launcher_lifecycle(handle: ExtEventSink, window_id: WindowId) {
     loop {
-        let steamvr_ok = check_steamvr_installation();
+        let steamvr_ok = commands::check_steamvr_installation();
 
         if steamvr_ok {
             break;
         } else {
-            let steamvr = format!(
-                "SteamVR installed: {}",
-                if steamvr_ok {
-                    "✅"
-                } else {
-                    "❌ Make sure you launched it at least once, then close it."
-                }
-            );
+            let steamvr_string =
+                "SteamVR not installed: make sure you launched it at least once, then close it.";
+
             handle
                 .submit_command(
                     CHANGE_VIEW_CMD,
-                    View::RequirementsCheck { steamvr },
+                    View::RequirementsCheck {
+                        steamvr: steamvr_string.to_owned(),
+                    },
                     Target::Auto,
                 )
                 .ok();
@@ -60,9 +63,7 @@ fn launcher_lifecycle(handle: ExtEventSink, window_id: WindowId) {
     let mut tried_steamvr_launch = false;
     loop {
         // get a small non-code file
-        let maybe_response = request_agent
-            .get("http://127.0.0.1:8082/favicon.png")
-            .call();
+        let maybe_response = request_agent.get("http://127.0.0.1:8082/index.html").call();
         if let Ok(response) = maybe_response {
             if response.status() == 200 {
                 handle.submit_command(CLOSE_WINDOW, (), window_id).ok();
@@ -72,12 +73,12 @@ fn launcher_lifecycle(handle: ExtEventSink, window_id: WindowId) {
 
         // try to launch SteamVR only one time automatically
         if !tried_steamvr_launch {
-            if show_err(maybe_register_alvr_driver()).is_some() {
-                if is_steamvr_running() {
-                    kill_steamvr();
+            if alvr_common::show_err(commands::maybe_register_alvr_driver()).is_some() {
+                if commands::is_steamvr_running() {
+                    commands::kill_steamvr();
                     thread::sleep(Duration::from_secs(2))
                 }
-                maybe_launch_steamvr();
+                commands::maybe_launch_steamvr();
             }
             tried_steamvr_launch = true;
         }
@@ -96,11 +97,11 @@ fn reset_and_retry(handle: ExtEventSink) {
             )
             .ok();
 
-        kill_steamvr();
+        commands::kill_steamvr();
 
-        fix_steamvr();
+        commands::fix_steamvr();
 
-        restart_steamvr();
+        commands::restart_steamvr();
 
         thread::sleep(Duration::from_secs(2));
 
@@ -189,20 +190,23 @@ fn get_window_location() -> (f64, f64) {
 }
 
 fn make_window() -> StrResult {
-    let instance_mutex = trace_err!(single_instance::SingleInstance::new("alvr_launcher_mutex"))?;
+    let instance_mutex =
+        single_instance::SingleInstance::new("alvr_launcher_mutex").map_err(err!())?;
     if instance_mutex.is_single() {
-        let current_alvr_dir = current_alvr_dir()?;
+        let driver_dir = afs::filesystem_layout_from_launcher_exe(&env::current_exe().unwrap())
+            .openvr_driver_root_dir;
 
-        if current_alvr_dir.to_str().filter(|s| s.is_ascii()).is_none() {
-            show_e_blocking(format!(
-                "The path of this folder ({}) contains non ASCII characters. Please move it somewhere else (for example in C:\\Users\\Public\\Documents).",
-                current_alvr_dir.to_string_lossy(),
+        if driver_dir.to_str().filter(|s| s.is_ascii()).is_none() {
+            alvr_common::show_e_blocking(format!(
+                "The path of this folder ({}) contains non ASCII characters. {}",
+                driver_dir.to_string_lossy(),
+                "Please move it somewhere else (for example in C:\\Users\\Public\\Documents).",
             ));
             return Ok(());
         }
 
         #[cfg(target_os = "linux")]
-        trace_err!(gtk::init())?;
+        gtk::init().map_err(err!())?;
 
         let window = WindowDesc::new(gui)
             .title("ALVR Launcher")
@@ -236,7 +240,7 @@ fn make_window() -> StrResult {
         let handle = app.get_external_handle();
         thread::spawn(move || launcher_lifecycle(handle, window_id));
 
-        trace_err!(app.launch(state))?;
+        app.launch(state).map_err(err!())?;
     }
     Ok(())
 }
@@ -244,10 +248,10 @@ fn make_window() -> StrResult {
 fn main() {
     let args = env::args().collect::<Vec<_>>();
     match args.get(1) {
-        Some(flag) if flag == "--restart-steamvr" => restart_steamvr(),
-        Some(flag) if flag == "--update" => invoke_installer(),
-        _ => {
-            show_err_blocking(make_window());
+        Some(flag) if flag == "--restart-steamvr" => commands::restart_steamvr(),
+        Some(flag) if flag == "--update" => commands::invoke_installer(),
+        Some(_) | None => {
+            alvr_common::show_err_blocking(make_window());
         }
     }
 }

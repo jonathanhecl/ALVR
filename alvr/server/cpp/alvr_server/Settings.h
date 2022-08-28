@@ -1,10 +1,7 @@
 #pragma once
 
-#include <openvr_driver.h>
-#include "common-utils.h"
-#include "Bitrate.h"
-#include "Utils.h"
-#include "FFR.h"
+#include <string>
+#include "ALVR-common/packet_types.h"
 
 class Settings
 {
@@ -39,8 +36,8 @@ public:
 	uint64_t m_DriverTestMode = 0;
 
 	int m_refreshRate;
-	int32_t m_renderWidth;
-	int32_t m_renderHeight;
+	uint32_t m_renderWidth;
+	uint32_t m_renderHeight;
 	int32_t m_recommendedTargetWidth;
 	int32_t m_recommendedTargetHeight;
 
@@ -50,9 +47,12 @@ public:
 	float m_flIPD;
 
 	bool m_enableFoveatedRendering;
-	float m_foveationStrength;
-	float m_foveationShape;
-	float m_foveationVerticalOffset;
+	float m_foveationCenterSizeX;
+	float m_foveationCenterSizeY;
+	float m_foveationCenterShiftX;
+	float m_foveationCenterShiftY;
+	float m_foveationEdgeRatioX;
+	float m_foveationEdgeRatioY;
 
 	bool m_enableColorCorrection;
 	float m_brightness;
@@ -62,15 +62,20 @@ public:
 	float m_sharpening;
 
 	int m_codec;
-	std::string m_EncoderOptions;
-	Bitrate mEncodeBitrate;
-
-	int m_Port;
-	std::string m_ConnectedClient;
-	Bitrate mThrottlingBitrate;
-
-
-	uint32_t m_clientRecvBufferSize;
+	uint64_t mEncodeBitrateMBs;
+	bool m_enableAdaptiveBitrate;
+	uint64_t m_adaptiveBitrateMaximum;
+	uint64_t m_adaptiveBitrateTarget;
+	bool m_adaptiveBitrateUseFrametime;
+	uint64_t m_adaptiveBitrateTargetMaximum;
+	int32_t m_adaptiveBitrateTargetOffset;
+	uint64_t m_adaptiveBitrateThreshold;
+	uint64_t m_adaptiveBitrateUpRate;
+	uint64_t m_adaptiveBitrateDownRate;
+	float m_adaptiveBitrateLightLoadThreshold;
+	bool m_use10bitEncoder;
+	bool m_force_sw_encoding;
+	uint32_t m_swThreadCount;
 
 	// Controller configs
 	std::string m_controllerTrackingSystemName;
@@ -79,12 +84,14 @@ public:
 	std::string m_controllerRenderModelNameLeft;
 	std::string m_controllerRenderModelNameRight;
 	std::string m_controllerSerialNumber;
-	std::string m_controllerType;
+	std::string m_controllerTypeLeft;
+	std::string m_controllerTypeRight;
 	std::string mControllerRegisteredDeviceType;
 	std::string m_controllerInputProfilePath;
 	bool m_disableController;
 
-	double m_controllerPoseOffset = 0;
+	float m_linearVelocityCutoff;
+	float m_angularVelocityCutoff;
 
 	float m_OffsetPos[3];
 	bool m_EnableOffsetPos;
@@ -93,6 +100,10 @@ public:
 	double m_leftControllerRotationOffset[3];
 
 	float m_hapticsIntensity;
+	float m_hapticsAmplitudeCurve;
+	float m_hapticsMinDuration;
+	float m_hapticsLowDurationAmplitudeMultiplier;
+	float m_hapticsLowDurationRange;
 
 	int32_t m_causePacketLoss;
 
@@ -107,5 +118,14 @@ public:
 	bool m_captureComposedDDSTrigger = false;
 	
 	int m_controllerMode = 0;
-};
 
+	bool m_TrackingRefOnly = false;
+
+	bool m_enableViveTrackerProxy = false;
+
+	bool m_useHeadsetTrackingSystem = false;
+	
+	bool m_enableFec;
+
+	bool m_enableLinuxVulkanAsync;
+};

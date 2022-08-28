@@ -1,177 +1,317 @@
-//===================== Copyright (c) Valve Corporation. All Rights Reserved. ======================
-//
-// Example OpenVR driver for demonstrating IVRVirtualDisplay interface.
-//
-//==================================================================================================
-
-#include "bindings.h"
-
+#ifdef _WIN32
+#include "platform/win32/CEncoder.h"
 #include <windows.h>
-#include "openvr_driver.h"
-#include "sharedstate.h"
+#elif __APPLE__
+#include "platform/macos/CEncoder.h"
+#else
+#include "platform/linux/CEncoder.h"
+#endif
 #include "ClientConnection.h"
+#include "Logger.h"
+#include "OvrController.h"
 #include "OvrHMD.h"
+#include "Paths.h"
+#include "Settings.h"
+#include "Statistics.h"
+#include "TrackedDevice.h"
+#include "bindings.h"
 #include "driverlog.h"
+#include "openvr_driver.h"
+#include <cstring>
+#include <map>
+#include <optional>
 
-HINSTANCE g_hInstance;
+static void load_debug_privilege(void) {
+#ifdef _WIN32
+    const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
+    TOKEN_PRIVILEGES tp;
+    HANDLE token;
+    LUID val;
 
+    if (!OpenProcessToken(GetCurrentProcess(), flags, &token)) {
+        return;
+    }
 
-static void load_debug_privilege(void)
-{
-	const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
-	TOKEN_PRIVILEGES tp;
-	HANDLE token;
-	LUID val;
+    if (!!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &val)) {
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = val;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-	if (!OpenProcessToken(GetCurrentProcess(), flags, &token)) {
-		return;
-	}
+        AdjustTokenPrivileges(token, false, &tp, sizeof(tp), NULL, NULL);
+    }
 
-	if (!!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &val)) {
-		tp.PrivilegeCount = 1;
-		tp.Privileges[0].Luid = val;
-		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!!LookupPrivilegeValue(NULL, SE_INC_BASE_PRIORITY_NAME, &val)) {
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = val;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-		AdjustTokenPrivileges(token, false, &tp, sizeof(tp), NULL,
-			NULL);
-	}
+        if (!AdjustTokenPrivileges(token, false, &tp, sizeof(tp), NULL, NULL)) {
+            Warn("[GPU PRIO FIX] Could not set privilege to increase GPU priority\n");
+        }
+    }
 
-	if (!!LookupPrivilegeValue(NULL, SE_INC_BASE_PRIORITY_NAME, &val)) {
-		tp.PrivilegeCount = 1;
-		tp.Privileges[0].Luid = val;
-		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    Debug("[GPU PRIO FIX] Succeeded to set some sort of priority.\n");
 
-		if (!AdjustTokenPrivileges(token, false, &tp, sizeof(tp), NULL, NULL)) {
-			Warn("[GPU PRIO FIX] Could not set privilege to increase GPU priority\n");
-		}
-	}
-
-	Debug("[GPU PRIO FIX] Succeeded to set some sort of priority.\n");
-
-	CloseHandle(token);
+    CloseHandle(token);
+#endif
 }
 
-//-----------------------------------------------------------------------------
-// Purpose: Server interface implementation.
-//-----------------------------------------------------------------------------
-class CServerDriver_DisplayRedirect : public vr::IServerTrackedDeviceProvider
-{
-public:
-	CServerDriver_DisplayRedirect()
-		: m_pRemoteHmd( NULL )
-	{}
+class DriverProvider : public vr::IServerTrackedDeviceProvider {
+  public:
+    std::shared_ptr<OvrHmd> hmd;
+    std::shared_ptr<OvrController> left_controller, right_controller;
+    // std::vector<OvrViveTrackerProxy> generic_trackers;
 
-	virtual vr::EVRInitError Init( vr::IVRDriverContext *pContext ) override;
-	virtual void Cleanup() override;
-	virtual const char * const *GetInterfaceVersions() override
-		{ return vr::k_InterfaceVersions;  }
-	virtual const char *GetTrackedDeviceDriverVersion()
-		{ return vr::ITrackedDeviceServerDriver_Version; }
-	virtual void RunFrame();
-	virtual bool ShouldBlockStandbyMode() override { return false; }
-	virtual void EnterStandby() override {}
-	virtual void LeaveStandby() override {}
+    std::map<uint64_t, TrackedDevice *> tracked_devices;
 
-	std::shared_ptr<OvrHmd> m_pRemoteHmd;
-};
+    virtual vr::EVRInitError Init(vr::IVRDriverContext *pContext) override {
+        VR_INIT_SERVER_DRIVER_CONTEXT(pContext);
+        InitDriverLog(vr::VRDriverLog());
 
-vr::EVRInitError CServerDriver_DisplayRedirect::Init( vr::IVRDriverContext *pContext )
-{
-	VR_INIT_SERVER_DRIVER_CONTEXT( pContext );
-	InitDriverLog(vr::VRDriverLog());
+        this->hmd = std::make_shared<OvrHmd>();
+        this->left_controller = this->hmd->m_leftController;
+        this->right_controller = this->hmd->m_rightController;
 
-	//create new virtuall hmd
-	m_pRemoteHmd = std::make_shared<OvrHmd>();
+        this->tracked_devices.insert({HEAD_PATH, (TrackedDevice *)&*this->hmd});
+        if (this->left_controller && this->right_controller) {
+            this->tracked_devices.insert(
+                {LEFT_HAND_PATH, (TrackedDevice *)&*this->left_controller});
+            this->tracked_devices.insert(
+                {RIGHT_HAND_PATH, (TrackedDevice *)&*this->right_controller});
+        }
 
-	return vr::VRInitError_None;
-}
+        return vr::VRInitError_None;
+    }
+    virtual void Cleanup() override {
+        this->left_controller.reset();
+        this->right_controller.reset();
+        this->hmd.reset();
 
-void CServerDriver_DisplayRedirect::Cleanup()
-{
-	m_pRemoteHmd.reset();
+        CleanupDriverLog();
 
-	CleanupDriverLog();
+        VR_CLEANUP_SERVER_DRIVER_CONTEXT();
+    }
+    virtual const char *const *GetInterfaceVersions() override { return vr::k_InterfaceVersions; }
+    virtual const char *GetTrackedDeviceDriverVersion() {
+        return vr::ITrackedDeviceServerDriver_Version;
+    }
+    virtual void RunFrame() override {
+        vr::VREvent_t event;
+        while (vr::VRServerDriverHost()->PollNextEvent(&event, sizeof(vr::VREvent_t))) {
+            if (event.eventType == vr::VREvent_Input_HapticVibration) {
+                vr::VREvent_HapticVibration_t haptics_info = event.data.hapticVibration;
 
-	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
-}
+                auto duration = haptics_info.fDurationSeconds;
+                auto amplitude = haptics_info.fAmplitude;
 
-void CServerDriver_DisplayRedirect::RunFrame()
-{
-}
+                if (duration < Settings::Instance().m_hapticsMinDuration * 0.5)
+                    duration = Settings::Instance().m_hapticsMinDuration * 0.5;
 
-CServerDriver_DisplayRedirect g_serverDriverDisplayRedirect;
+                amplitude =
+                    pow(amplitude *
+                            ((Settings::Instance().m_hapticsLowDurationAmplitudeMultiplier - 1) *
+                                 Settings::Instance().m_hapticsMinDuration *
+                                 Settings::Instance().m_hapticsLowDurationRange /
+                                 (pow(Settings::Instance().m_hapticsMinDuration *
+                                          Settings::Instance().m_hapticsLowDurationRange,
+                                      2) *
+                                      0.25 /
+                                      (duration -
+                                       0.5 * Settings::Instance().m_hapticsMinDuration *
+                                           (1 - Settings::Instance().m_hapticsLowDurationRange)) +
+                                  (duration -
+                                   0.5 * Settings::Instance().m_hapticsMinDuration *
+                                       (1 - Settings::Instance().m_hapticsLowDurationRange))) +
+                             1),
+                        1 - Settings::Instance().m_hapticsAmplitudeCurve);
+                duration =
+                    pow(Settings::Instance().m_hapticsMinDuration, 2) * 0.25 / duration + duration;
 
-
-BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID lpReserved)
-{
-	switch (dwReason) {
-	case DLL_PROCESS_ATTACH:
-		g_hInstance = hInstance;
-	}
-
-	return TRUE;
-}
+                if (this->left_controller &&
+                    haptics_info.containerHandle == this->left_controller->prop_container) {
+                    HapticsSend(
+                        LEFT_CONTROLLER_HAPTIC_PATH, duration, haptics_info.fFrequency, amplitude);
+                } else if (this->right_controller &&
+                           haptics_info.containerHandle == this->right_controller->prop_container) {
+                    HapticsSend(
+                        RIGHT_CONTROLLER_HAPTIC_PATH, duration, haptics_info.fFrequency, amplitude);
+                }
+            }
+        }
+    }
+    virtual bool ShouldBlockStandbyMode() override { return false; }
+    virtual void EnterStandby() override {}
+    virtual void LeaveStandby() override {}
+} g_driver_provider;
 
 // bindigs for Rust
 
-const uint8_t *FRAME_RENDER_VS_CSO_PTR;
-uint32_t FRAME_RENDER_VS_CSO_LEN;
-const uint8_t *FRAME_RENDER_PS_CSO_PTR;
-uint32_t FRAME_RENDER_PS_CSO_LEN;
-const uint8_t *QUAD_SHADER_CSO_PTR;
-uint32_t QUAD_SHADER_CSO_LEN;
-const uint8_t *COMPRESS_SLICES_CSO_PTR;
-uint32_t COMPRESS_SLICES_CSO_LEN;
-const uint8_t *COLOR_CORRECTION_CSO_PTR;
-uint32_t COLOR_CORRECTION_CSO_LEN;
+const unsigned char *FRAME_RENDER_VS_CSO_PTR;
+unsigned int FRAME_RENDER_VS_CSO_LEN;
+const unsigned char *FRAME_RENDER_PS_CSO_PTR;
+unsigned int FRAME_RENDER_PS_CSO_LEN;
+const unsigned char *QUAD_SHADER_CSO_PTR;
+unsigned int QUAD_SHADER_CSO_LEN;
+const unsigned char *COMPRESS_AXIS_ALIGNED_CSO_PTR;
+unsigned int COMPRESS_AXIS_ALIGNED_CSO_LEN;
+const unsigned char *COLOR_CORRECTION_CSO_PTR;
+unsigned int COLOR_CORRECTION_CSO_LEN;
 
-const char *g_alvrDir;
+const char *g_sessionPath;
+const char *g_driverRootDir;
 
 void (*LogError)(const char *stringPtr);
 void (*LogWarn)(const char *stringPtr);
 void (*LogInfo)(const char *stringPtr);
 void (*LogDebug)(const char *stringPtr);
-void (*DriverReadyIdle)();
+void (*LogPeriodically)(const char *tag, const char *stringPtr);
+void (*DriverReadyIdle)(bool setDefaultChaprone);
+void (*VideoSend)(VideoFrame header, unsigned char *buf, int len);
+void (*HapticsSend)(unsigned long long path, float duration_s, float frequency, float amplitude);
 void (*ShutdownRuntime)();
+unsigned long long (*PathStringToHash)(const char *path);
+void (*ReportPresent)(unsigned long long timestamp_ns);
+void (*ReportComposed)(unsigned long long timestamp_ns);
+void (*ReportEncoded)(unsigned long long timestamp_ns);
+void (*ReportFecFailure)(int percentage);
 
-void *CppEntryPoint(const char *pInterfaceName, int *pReturnCode)
-{
-	Settings::Instance().Load();
+void *CppEntryPoint(const char *interface_name, int *return_code) {
+    // Initialize path constants
+    init_paths();
 
-	load_debug_privilege();
+    Settings::Instance().Load();
 
-	Debug("HmdDriverFactory %hs (%hs)\n", pInterfaceName, vr::IServerTrackedDeviceProvider_Version);
-	if (0 == strcmp(vr::IServerTrackedDeviceProvider_Version, pInterfaceName))
-	{
-		Debug("HmdDriverFactory server return\n");
-		return &g_serverDriverDisplayRedirect;
-	}
+    load_debug_privilege();
 
-	if (pReturnCode)
-		*pReturnCode = vr::VRInitError_Init_InterfaceNotFound;
-
-	return NULL;
+    if (std::string(interface_name) == vr::IServerTrackedDeviceProvider_Version) {
+        *return_code = vr::VRInitError_None;
+        return &g_driver_provider;
+    } else {
+        *return_code = vr::VRInitError_Init_InterfaceNotFound;
+        return nullptr;
+    }
 }
 
 void InitializeStreaming() {
-	// set correct client ip
-	Settings::Instance().Load();
+    // set correct client ip
+    Settings::Instance().Load();
 
-	if (g_serverDriverDisplayRedirect.m_pRemoteHmd)
-		g_serverDriverDisplayRedirect.m_pRemoteHmd->StartStreaming();
+    if (g_driver_provider.hmd) {
+        g_driver_provider.hmd->StartStreaming();
+    }
 }
 
 void DeinitializeStreaming() {
-	if (g_serverDriverDisplayRedirect.m_pRemoteHmd)
-		g_serverDriverDisplayRedirect.m_pRemoteHmd->StopStreaming();
+    // nothing to do
 }
 
 void RequestIDR() {
-	if (g_serverDriverDisplayRedirect.m_pRemoteHmd)
-		g_serverDriverDisplayRedirect.m_pRemoteHmd->RequestIDR();
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_encoder) {
+        g_driver_provider.hmd->m_encoder->InsertIDR();
+    }
 }
 
-extern "C" void ShutdownSteamvr() {
-	if (g_serverDriverDisplayRedirect.m_pRemoteHmd)
-		g_serverDriverDisplayRedirect.m_pRemoteHmd->OnShutdown();
+void SetTracking(unsigned long long targetTimestampNs,
+                 float controllerPredictionS,
+                 const AlvrDeviceMotion *deviceMotions,
+                 int motionsCount,
+                 OculusHand leftHand,
+                 OculusHand rightHand) {
+    for (int i = 0; i < motionsCount; i++) {
+        if (deviceMotions[i].deviceID == HEAD_PATH && g_driver_provider.hmd) {
+            g_driver_provider.hmd->OnPoseUpdated(
+                targetTimestampNs, controllerPredictionS, deviceMotions[i]);
+        } else {
+            if (deviceMotions[i].deviceID == LEFT_HAND_PATH && g_driver_provider.left_controller) {
+                g_driver_provider.left_controller->onPoseUpdate(
+                    controllerPredictionS, deviceMotions[i], leftHand);
+            } else if (deviceMotions[i].deviceID == RIGHT_HAND_PATH &&
+                       g_driver_provider.right_controller) {
+                g_driver_provider.right_controller->onPoseUpdate(
+                    controllerPredictionS, deviceMotions[i], rightHand);
+            }
+        }
+    }
+}
+void ReportNetworkLatency(unsigned long long latencyUs) {
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_Listener) {
+        g_driver_provider.hmd->m_Listener->ReportNetworkLatency(latencyUs);
+    }
+}
+
+unsigned long long GetGameFrameIntervalNs() {
+    vr::Compositor_FrameTiming timings[2];
+    timings[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+    timings[1].m_nSize = sizeof(vr::Compositor_FrameTiming);
+    vr::VRServerDriverHost()->GetFrameTimings(timings, 2);
+    auto t = timings[0];
+    // Warn("%f, %f, %f, %f, %f, %f, %f, %f, %f, %f",
+    //     t.m_flClientFrameIntervalMs,
+    //     t.m_flPresentCallCpuMs,
+    //     t.m_flWaitForPresentCpuMs,
+    //     t.m_flSubmitFrameMs,
+    //     t.m_flPreSubmitGpuMs,
+    //     t.m_flPostSubmitGpuMs,
+    //     t.m_flTotalRenderGpuMs,
+    //     t.m_flCompositorRenderGpuMs,
+    //     t.m_flCompositorRenderCpuMs,
+    //     t.m_flCompositorIdleCpuMs);
+    return (t.m_flClientFrameIntervalMs + t.m_flPresentCallCpuMs +
+            t.m_flWaitForPresentCpuMs // fixme: this should be near zero but it takes the whole
+                                      // frame time!
+            + t.m_flSubmitFrameMs
+            // + t.m_flPreSubmitGpuMs
+            // + t.m_flPostSubmitGpuMs
+            // + t.m_flTotalRenderGpuMs
+            + t.m_flCompositorRenderGpuMs + t.m_flCompositorRenderCpuMs +
+            t.m_flCompositorIdleCpuMs) *
+           1e6;
+}
+void VideoErrorReportReceive() {
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_Listener) {
+        g_driver_provider.hmd->m_Listener->OnFecFailure();
+        g_driver_provider.hmd->m_encoder->OnPacketLoss();
+    }
+}
+
+void ShutdownSteamvr() {
+    if (g_driver_provider.hmd) {
+        vr::VRServerDriverHost()->VendorSpecificEvent(
+            g_driver_provider.hmd->object_id, vr::VREvent_DriverRequestedQuit, {}, 0);
+    }
+}
+
+void SetOpenvrProperty(unsigned long long top_level_path, OpenvrProperty prop) {
+    auto device_it = g_driver_provider.tracked_devices.find(top_level_path);
+
+    if (device_it != g_driver_provider.tracked_devices.end()) {
+        device_it->second->set_prop(prop);
+    }
+}
+
+void SetViewsConfig(ViewsConfigData config) {
+    if (g_driver_provider.hmd) {
+        g_driver_provider.hmd->SetViewsConfig(config);
+    }
+}
+
+void SetBattery(unsigned long long top_level_path, float gauge_value, bool is_plugged) {
+    auto device_it = g_driver_provider.tracked_devices.find(top_level_path);
+
+    if (device_it != g_driver_provider.tracked_devices.end()) {
+        vr::VRProperties()->SetFloatProperty(
+            device_it->second->prop_container, vr::Prop_DeviceBatteryPercentage_Float, gauge_value);
+        vr::VRProperties()->SetBoolProperty(
+            device_it->second->prop_container, vr::Prop_DeviceIsCharging_Bool, is_plugged);
+    }
+}
+
+void SetButton(unsigned long long path, AlvrButtonValue value) {
+    if (std::find(LEFT_CONTROLLER_BUTTONS.begin(), LEFT_CONTROLLER_BUTTONS.end(), path) !=
+        LEFT_CONTROLLER_BUTTONS.end()) {
+        g_driver_provider.left_controller->SetButton(path, value);
+    } else if (std::find(RIGHT_CONTROLLER_BUTTONS.begin(), RIGHT_CONTROLLER_BUTTONS.end(), path) !=
+               RIGHT_CONTROLLER_BUTTONS.end()) {
+        g_driver_provider.right_controller->SetButton(path, value);
+    }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "alvr_vrcompositor_wrapper"
+version = "19.0.0-dev00"
+authors = ["alvr-org", "Patrick Nicolas <patricknicolas@laposte.net>"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.58"
+
+[dependencies]
+exec = "0.3.1"

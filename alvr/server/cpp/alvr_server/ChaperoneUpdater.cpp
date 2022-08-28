@@ -1,61 +1,54 @@
-#include "bindings.h"
+#include "ALVR-common/packet_types.h"
 #include "Logger.h"
-#include "packet_types.h"
-#include <vector>
+#include "bindings.h"
+#include <mutex>
+
+#ifndef __APPLE__
 #include <openvr.h>
+#endif
 
 using namespace std;
 
-void SetChaperone(const float transform[12], float areaWidth, float areaHeight,
-				  float (*perimeterPoints)[2], unsigned int perimeterPointsCount)
-{
-	if (perimeterPointsCount == 0)
-	{
-		areaWidth = 2.0f;
-		areaHeight = 2.0f;
+static std::mutex chaperone_mutex;
 
-		static float standingPerimeterPointsBuffer[4][2];
-		standingPerimeterPointsBuffer[0][0] = -1.0f;
-		standingPerimeterPointsBuffer[0][1] = -1.0f;
-		standingPerimeterPointsBuffer[1][0] = -1.0f;
-		standingPerimeterPointsBuffer[1][1] = 1.0f;
-		standingPerimeterPointsBuffer[2][0] = 1.0f;
-		standingPerimeterPointsBuffer[2][1] = 1.0f;
-		standingPerimeterPointsBuffer[3][0] = 1.0f;
-		standingPerimeterPointsBuffer[3][1] = -1.0f;
+void SetChaperone(float areaWidth, float areaHeight) {
+#ifndef __APPLE__
+    const vr::HmdMatrix34_t MATRIX_IDENTITY = {
+        {{1.0, 0.0, 0.0, 0.0}, {0.0, 1.0, 0.0, 0.0}, {0.0, 0.0, 1.0, 0.0}}};
 
-		perimeterPoints = standingPerimeterPointsBuffer;
-		perimeterPointsCount = 4;
-	}
+    float perimeterPoints[4][2];
 
-	vr::EVRInitError error;
-	vr::VR_Init(&error, vr::VRApplication_Utility);
+    perimeterPoints[0][0] = -1.0f * areaWidth;
+    perimeterPoints[0][1] = -1.0f * areaHeight;
+    perimeterPoints[1][0] = -1.0f * areaWidth;
+    perimeterPoints[1][1] = 1.0f * areaHeight;
+    perimeterPoints[2][0] = 1.0f * areaWidth;
+    perimeterPoints[2][1] = 1.0f * areaHeight;
+    perimeterPoints[3][0] = 1.0f * areaWidth;
+    perimeterPoints[3][1] = -1.0f * areaHeight;
 
-	if (error != vr::VRInitError_None)
-	{
-		Warn("Failed to init OpenVR client to update Chaperone boundary! Error: %d", error);
-		return;
-	}
+    std::unique_lock<std::mutex> lock(chaperone_mutex);
 
-	vr::VRChaperoneSetup()->RoomSetupStarting();
+    vr::EVRInitError error;
+    vr::VR_Init(&error, vr::VRApplication_Utility);
 
-	vr::VRChaperoneSetup()->SetWorkingPerimeter(reinterpret_cast<vr::HmdVector2_t *>(perimeterPoints), perimeterPointsCount);
-	vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(reinterpret_cast<vr::HmdMatrix34_t *>(&transform));
-	vr::VRChaperoneSetup()->SetWorkingSeatedZeroPoseToRawTrackingPose(reinterpret_cast<vr::HmdMatrix34_t *>(&transform));
-	vr::VRChaperoneSetup()->SetWorkingPlayAreaSize(areaWidth, areaHeight);
-	vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+    if (error != vr::VRInitError_None) {
+        Warn("Failed to init OpenVR client to update Chaperone boundary! Error: %d", error);
+        return;
+    }
 
-	// Hide SteamVR Chaperone
-	vr::VRSettings()->SetFloat(vr::k_pch_CollisionBounds_Section, vr::k_pch_CollisionBounds_FadeDistance_Float, 0.0f);
+    vr::VRChaperoneSetup()->RoomSetupStarting();
+    vr::VRChaperoneSetup()->SetWorkingPerimeter(
+        reinterpret_cast<vr::HmdVector2_t *>(perimeterPoints), 4);
+    vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(&MATRIX_IDENTITY);
+    vr::VRChaperoneSetup()->SetWorkingSeatedZeroPoseToRawTrackingPose(&MATRIX_IDENTITY);
+    vr::VRChaperoneSetup()->SetWorkingPlayAreaSize(areaWidth, areaHeight);
+    vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
 
-	vr::VR_Shutdown();
-}
+    // Hide SteamVR Chaperone
+    vr::VRSettings()->SetFloat(
+        vr::k_pch_CollisionBounds_Section, vr::k_pch_CollisionBounds_FadeDistance_Float, 0.0f);
 
-void SetDefaultChaperone()
-{
-	float transform[12] = {1, 0, 0, 0,
-						   0, 1, 0, 1.5,
-						   0, 0, 1, 0};
-
-	SetChaperone(transform, 0, 0, nullptr, 0);
+    vr::VR_Shutdown();
+#endif
 }

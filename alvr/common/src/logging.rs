@@ -1,10 +1,4 @@
-use serde::{Deserialize, Serialize};
 use std::{fmt::Display, future::Future};
-
-pub type StrResult<T = ()> = Result<T, String>;
-
-pub const SESSION_LOG_FNAME: &str = "session_log.txt";
-pub const CRASH_LOG_FNAME: &str = "crash_log.txt";
 
 pub fn set_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
@@ -13,14 +7,13 @@ pub fn set_panic_hook() {
             .downcast_ref::<&str>()
             .unwrap_or(&"Unavailable");
         let err_str = format!(
-            "Message: {:?}\nBacktrace:\n{:?}",
-            message,
+            "Message: {message:?}\nBacktrace:\n{:?}",
             backtrace::Backtrace::new()
         );
 
-        log::error!("{}", err_str);
+        log::error!("{err_str}");
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(windows)]
         std::thread::spawn(move || {
             msgbox::create("ALVR panicked", &err_str, msgbox::IconType::Error).ok();
         });
@@ -28,10 +21,10 @@ pub fn set_panic_hook() {
 }
 
 pub fn show_w<W: Display>(w: W) {
-    log::warn!("{}", w);
+    log::warn!("{w}");
 
     // GDK crashes because of initialization in multiple thread
-    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    #[cfg(windows)]
     std::thread::spawn({
         let warn_string = w.to_string();
         move || {
@@ -51,27 +44,40 @@ pub fn show_warn<T, E: Display>(res: Result<T, E>) -> Option<T> {
 
 #[allow(unused_variables)]
 fn show_e_block<E: Display>(e: E, blocking: bool) {
-    log::error!("{}", e);
+    log::error!("{e}");
 
     // GDK crashes because of initialization in multiple thread
-    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    #[cfg(windows)]
     {
-        let show_msgbox = {
-            let err_string = e.to_string();
-            move || {
-                msgbox::create(
-                    "ALVR encountered an error",
-                    &err_string,
-                    msgbox::IconType::Error,
-                )
-                .ok();
-            }
-        };
+        // Store the last error shown in a message box. Do not open a new message box if the content
+        // of the error has not changed
+        use once_cell::sync::Lazy;
+        use parking_lot::Mutex;
 
-        if blocking {
-            show_msgbox();
-        } else {
-            std::thread::spawn(show_msgbox);
+        static LAST_MESSAGEBOX_ERROR: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("".into()));
+
+        let err_string = e.to_string();
+        let last_messagebox_error_ref = &mut *LAST_MESSAGEBOX_ERROR.lock();
+        if *last_messagebox_error_ref != err_string {
+            let show_msgbox = {
+                let err_string = err_string.clone();
+                move || {
+                    msgbox::create(
+                        "ALVR encountered an error",
+                        &err_string,
+                        msgbox::IconType::Error,
+                    )
+                    .ok();
+                }
+            };
+
+            if blocking {
+                show_msgbox();
+            } else {
+                std::thread::spawn(show_msgbox);
+            }
+
+            *last_messagebox_error_ref = err_string;
         }
     }
 }
@@ -81,7 +87,7 @@ pub fn show_e<E: Display>(e: E) {
 }
 
 pub fn show_e_dbg<E: std::fmt::Debug>(e: E) {
-    show_e_block(format!("{:?}", e), false);
+    show_e_block(format!("{e:?}"), false);
 }
 
 pub fn show_e_blocking<E: Display>(e: E) {
@@ -102,39 +108,6 @@ pub async fn show_err_async<T, E: Display>(
     show_err(future_res.await)
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionUpdateType {
-    Settings,
-    ClientList,
-    Other, // other top level flags, like "setup_wizard"
-}
-
-// Log id is serialized as #{ "id": "..." [, "data": ...] }#
-// Pound signs are used to identify start and finish of json
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "id", content = "data")]
-pub enum LogId {
-    #[serde(rename_all = "camelCase")]
-    SessionUpdated {
-        web_client_id: Option<String>,
-        update_type: SessionUpdateType,
-    },
-    SessionSettingsExtrapolationFailed,
-    ClientFoundOk,
-    ClientFoundInvalid,
-    ClientFoundWrongIp,
-    ClientFoundWrongVersion(String),
-    ClientConnected,
-    ClientDisconnected,
-    UpdateDownloadedBytesCount(usize),
-    UpdateDownloadError,
-}
-
-pub fn log_id(id: LogId) {
-    log::info!("#{}#", serde_json::to_string(&id).unwrap());
-}
-
 #[macro_export]
 macro_rules! fmt_e {
     ($($args:tt)+) => {
@@ -143,30 +116,23 @@ macro_rules! fmt_e {
 }
 
 #[macro_export]
-macro_rules! trace_str {
+macro_rules! err {
     () => {
-        format!("At {}:{}", file!(), line!())
-    };
-}
-
-#[macro_export]
-macro_rules! trace_err {
-    ($res:expr) => {
-        $res.map_err(|e| format!("{}: {}", trace_str!(), e))
+        |e| format!("At {}:{}: {e}", file!(), line!())
     };
 }
 
 // trace_err variant for errors that do not implement fmt::Display
 #[macro_export]
-macro_rules! trace_err_dbg {
-    ($res:expr) => {
-        $res.map_err(|e| format!("{}: {:?}", trace_str!(), e))
+macro_rules! err_dbg {
+    () => {
+        |e| format!("At {}:{}: {e:?}", file!(), line!())
     };
 }
 
 #[macro_export]
-macro_rules! trace_none {
-    ($res:expr) => {
-        $res.ok_or_else(|| trace_str!())
+macro_rules! enone {
+    () => {
+        || format!("At {}:{}", file!(), line!())
     };
 }
