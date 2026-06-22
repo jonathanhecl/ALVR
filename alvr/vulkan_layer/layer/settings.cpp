@@ -38,11 +38,11 @@ void Settings::Load()
 		std::string err = picojson::parse(v, json);
 		if (!err.empty())
 		{
-			Error("Error on parsing json: %hs\n", err.c_str());
+			Error("Error on parsing session config (%s): %hs\n", g_sessionPath, err.c_str());
 			return;
 		}
 
-		auto config = v.get("openvr_config");
+		auto config = v.get("steamvr_hmd_init_config");
 
 		m_renderWidth = config.get("eye_resolution_width").get<int64_t>() * 2;
 		m_renderHeight = config.get("eye_resolution_height").get<int64_t>();
@@ -56,6 +56,6 @@ void Settings::Load()
 	}
 	catch (std::exception &e)
 	{
-		Error("Exception on parsing json: %hs\n", e.what());
+		Error("Exception on parsing session config (%s): %hs\n", g_sessionPath, e.what());
 	}
 }

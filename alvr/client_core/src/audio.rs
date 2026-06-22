@@ -1,133 +1,110 @@
-use alvr_audio::AudioDevice;
-use alvr_common::{parking_lot::Mutex, prelude::*};
+use alvr_audio::Device;
+use alvr_common::{
+    anyhow::{Result, bail},
+    parking_lot::Mutex,
+};
 use alvr_session::AudioBufferingConfig;
 use alvr_sockets::{StreamReceiver, StreamSender};
-use oboe::{
-    AudioInputCallback, AudioInputStreamSafe, AudioOutputCallback, AudioOutputStreamSafe,
-    AudioStream, AudioStreamBuilder, DataCallbackResult, InputPreset, Mono, PerformanceMode,
-    SampleRateConversionQuality, Stereo, Usage,
+use ndk::audio::{
+    AudioCallbackResult, AudioDirection, AudioError, AudioFormat, AudioInputPreset,
+    AudioPerformanceMode, AudioSharingMode, AudioStreamBuilder,
 };
 use std::{
     collections::VecDeque,
-    mem,
-    sync::{mpsc as smpsc, Arc},
-    thread,
+    mem, slice,
+    sync::{Arc, mpsc},
+    time::Duration,
 };
-use tokio::sync::mpsc as tmpsc;
 
-struct RecorderCallback {
-    sender: tmpsc::UnboundedSender<Vec<u8>>,
-}
-
-impl AudioInputCallback for RecorderCallback {
-    type FrameType = (i16, Mono);
-
-    fn on_audio_ready(
-        &mut self,
-        _: &mut dyn AudioInputStreamSafe,
-        frames: &[i16],
-    ) -> DataCallbackResult {
-        let mut sample_buffer = Vec::with_capacity(frames.len() * mem::size_of::<i16>());
-
-        for frame in frames {
-            sample_buffer.extend(&frame.to_ne_bytes());
-        }
-
-        self.sender.send(sample_buffer).ok();
-
-        DataCallbackResult::Continue
-    }
-}
+const INPUT_SAMPLES_MAX_BUFFER_COUNT: usize = 20;
+const INPUT_RECV_TIMEOUT: Duration = Duration::from_millis(20);
 
 #[allow(unused_variables)]
-pub async fn record_audio_loop(
-    device: AudioDevice,
+pub fn record_audio_blocking(
+    is_running: Arc<dyn Fn() -> bool + Send + Sync>,
+    mut sender: StreamSender<()>,
+    device: &Device,
     channels_count: u16,
     mute: bool,
-    mut sender: StreamSender<()>,
-) -> StrResult {
-    let sample_rate = device.input_sample_rate()?;
+) -> Result<()> {
+    assert_eq!(
+        channels_count, 1,
+        "This code only supports mono microphone input"
+    );
 
-    let (_shutdown_notifier, shutdown_receiver) = smpsc::channel::<()>();
-    let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
+    let sample_rate = alvr_audio::input_sample_rate(device)?;
 
-    thread::spawn(move || -> StrResult {
-        let mut stream = AudioStreamBuilder::default()
-            .set_shared()
-            .set_performance_mode(PerformanceMode::LowLatency)
-            .set_sample_rate(sample_rate as _)
-            .set_sample_rate_conversion_quality(SampleRateConversionQuality::Fastest)
-            .set_mono()
-            .set_i16()
-            .set_input()
-            .set_usage(Usage::VoiceCommunication)
-            .set_input_preset(InputPreset::VoiceCommunication)
-            .set_callback(RecorderCallback {
-                sender: data_sender,
-            })
-            .open_stream()
-            .map_err(err!())?;
+    let error = Arc::new(Mutex::new(None::<AudioError>));
 
-        stream.start().map_err(err!())?;
+    let (samples_sender, samples_receiver) =
+        mpsc::sync_channel::<Vec<u8>>(INPUT_SAMPLES_MAX_BUFFER_COUNT);
 
-        shutdown_receiver.recv().ok();
+    let stream = AudioStreamBuilder::new()?
+        .direction(AudioDirection::Input)
+        .channel_count(1)
+        .sample_rate(sample_rate as _)
+        .format(AudioFormat::PCM_I16)
+        .input_preset(AudioInputPreset::VoiceCommunication)
+        .performance_mode(AudioPerformanceMode::LowLatency)
+        .sharing_mode(AudioSharingMode::Shared)
+        .data_callback(Box::new(move |_, data_ptr, frames_count| {
+            let buffer_size = frames_count as usize * mem::size_of::<i16>();
 
-        // This call gets stuck if the headset goes to sleep, but finishes when the headset wakes up
-        stream.stop_with_timeout(0).ok();
+            let sample_buffer =
+                unsafe { slice::from_raw_parts(data_ptr as *mut u8, buffer_size) }.to_vec();
 
-        Ok(())
-    });
+            // it will block only when the channel is full
+            samples_sender.send(sample_buffer).ok();
 
-    while let Some(data) = data_receiver.recv().await {
-        let mut buffer = sender.new_buffer(&(), data.len())?;
-        buffer.get_mut().extend(data);
-        sender.send_buffer(buffer).await.ok();
+            AudioCallbackResult::Continue
+        }))
+        .error_callback({
+            let error = Arc::clone(&error);
+            Box::new(move |_, e| *error.lock() = Some(e.into()))
+        })
+        .open_stream()?;
+
+    // If configuration changed, the stream must be restarted
+    if stream.channel_count() != 1
+        || stream.sample_rate() != sample_rate as i32
+        || stream.format() != AudioFormat::PCM_I16
+    {
+        bail!("Invalid audio configuration");
+    }
+
+    stream.request_start()?;
+
+    while is_running() && error.lock().is_none() {
+        while let Ok(sample_buffer) = samples_receiver.recv_timeout(INPUT_RECV_TIMEOUT) {
+            sender.send_header_with_payload(&(), &sample_buffer).ok();
+        }
+    }
+
+    // Note: request_stop() is asynchronous, and must be called always, even on error
+    stream.request_stop()?;
+
+    if let Some(e) = *error.lock() {
+        return Err(e.into());
     }
 
     Ok(())
 }
 
-struct PlayerCallback {
-    sample_buffer: Arc<Mutex<VecDeque<f32>>>,
-    batch_frames_count: usize,
-}
-
-impl AudioOutputCallback for PlayerCallback {
-    type FrameType = (f32, Stereo);
-
-    fn on_audio_ready(
-        &mut self,
-        _: &mut dyn AudioOutputStreamSafe,
-        out_frames: &mut [(f32, f32)],
-    ) -> DataCallbackResult {
-        assert!(self.batch_frames_count == out_frames.len());
-
-        let samples = alvr_audio::get_next_frame_batch(
-            &mut *self.sample_buffer.lock(),
-            2,
-            self.batch_frames_count,
-        );
-
-        for f in 0..out_frames.len() {
-            out_frames[f] = (samples[f * 2], samples[f * 2 + 1]);
-        }
-
-        DataCallbackResult::Continue
-    }
-}
-
 #[allow(unused_variables)]
-pub async fn play_audio_loop(
-    device: AudioDevice,
+pub fn play_audio_loop(
+    is_running: impl Fn() -> bool,
+    device: &Device,
     channels_count: u16,
     sample_rate: u32,
     config: AudioBufferingConfig,
-    receiver: StreamReceiver<()>,
-) -> StrResult {
+    receiver: &mut StreamReceiver<()>,
+) -> Result<()> {
+    assert_eq!(channels_count, 2, "This code only supports stereo output");
+
     // the client sends invalid sample rates sometimes, and we crash if we try and use one
     // (batch_frames_count ends up zero and the audio callback gets confused)
     if sample_rate < 8000 {
-        return fmt_e!("Invalid audio sample rate");
+        bail!("Invalid audio sample rate");
     }
 
     let batch_frames_count = sample_rate as usize * config.batch_ms as usize / 1000;
@@ -135,46 +112,69 @@ pub async fn play_audio_loop(
         sample_rate as usize * config.average_buffering_ms as usize / 1000;
 
     let sample_buffer = Arc::new(Mutex::new(VecDeque::new()));
+    let error = Arc::new(Mutex::new(None));
 
-    // store the stream in a thread (because !Send) and extract the playback handle
-    let (_shutdown_notifier, shutdown_receiver) = smpsc::channel::<()>();
-    thread::spawn({
-        let sample_buffer = Arc::clone(&sample_buffer);
-        move || -> StrResult {
-            let mut stream = AudioStreamBuilder::default()
-                .set_shared()
-                .set_performance_mode(PerformanceMode::LowLatency)
-                .set_sample_rate(sample_rate as _)
-                .set_sample_rate_conversion_quality(SampleRateConversionQuality::Fastest)
-                .set_stereo()
-                .set_f32()
-                .set_frames_per_callback(batch_frames_count as _)
-                .set_output()
-                .set_usage(Usage::Game)
-                .set_callback(PlayerCallback {
-                    sample_buffer,
-                    batch_frames_count,
-                })
-                .open_stream()
-                .map_err(err!())?;
+    let stream = AudioStreamBuilder::new()?
+        .direction(AudioDirection::Output)
+        .channel_count(2)
+        .sample_rate(sample_rate as _)
+        .format(AudioFormat::PCM_Float)
+        .frames_per_data_callback(batch_frames_count as _)
+        .performance_mode(AudioPerformanceMode::LowLatency)
+        .sharing_mode(AudioSharingMode::Shared)
+        .data_callback({
+            let sample_buffer = Arc::clone(&sample_buffer);
+            Box::new(move |_, data_ptr, frames_count| {
+                assert!(frames_count == batch_frames_count as i32);
 
-            stream.start().map_err(err!())?;
+                let samples = alvr_audio::get_next_frame_batch(
+                    &mut *sample_buffer.lock(),
+                    2,
+                    batch_frames_count as _,
+                );
 
-            shutdown_receiver.recv().ok();
+                let out_frames = unsafe {
+                    // 2 channels
+                    slice::from_raw_parts_mut(data_ptr as *mut f32, frames_count as usize * 2)
+                };
+                out_frames.copy_from_slice(&samples);
 
-            // Note: Oboe crahes if stream.stop() is NOT called on AudioPlayer
-            stream.stop_with_timeout(0).ok();
+                AudioCallbackResult::Continue
+            })
+        })
+        .error_callback({
+            let error = Arc::clone(&error);
+            Box::new(move |_, e| *error.lock() = Some(e))
+        })
+        .open_stream()?;
 
-            Ok(())
-        }
-    });
+    // If configuration changed, the stream must be restarted
+    if stream.channel_count() != 2
+        || stream.sample_rate() != sample_rate as i32
+        || stream.format() != AudioFormat::PCM_Float
+        || stream.frames_per_data_callback() != Some(batch_frames_count as _)
+    {
+        bail!("Invalid audio configuration");
+    }
+
+    stream.request_start()?;
 
     alvr_audio::receive_samples_loop(
+        || is_running() && error.lock().is_none(),
         receiver,
         sample_buffer,
         2,
         batch_frames_count,
         average_buffer_frames_count,
     )
-    .await
+    .ok();
+
+    // Note: request_stop() is asynchronous, and must be called always, even on error
+    stream.request_stop()?;
+
+    if let Some(e) = *error.lock() {
+        return Err(e.into());
+    }
+
+    Ok(())
 }

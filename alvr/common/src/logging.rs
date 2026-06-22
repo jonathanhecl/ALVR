@@ -1,84 +1,258 @@
-use std::{fmt::Display, future::Future};
+use anyhow::Result;
+use backtrace::Backtrace;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use settings_schema::SettingsSchema;
+use std::{error::Error, fmt::Display, sync::OnceLock};
+
+pub const SERVER_IMPL_DBG_LABEL: &str = "SERVER IMPL";
+pub const CLIENT_IMPL_DBG_LABEL: &str = "CLIENT IMPL";
+pub const SERVER_CORE_DBG_LABEL: &str = "SERVER CORE";
+pub const CLIENT_CORE_DBG_LABEL: &str = "CLIENT CORE";
+pub const CONNECTION_DBG_LABEL: &str = "CONNECTION";
+pub const SOCKETS_DBG_LABEL: &str = "SOCKETS";
+pub const SERVER_GFX_DBG_LABEL: &str = "SERVER GFX";
+pub const CLIENT_GFX_DBG_LABEL: &str = "CLIENT GFX";
+pub const ENCODER_DBG_LABEL: &str = "ENCODER";
+pub const DECODER_DBG_LABEL: &str = "DECODER";
+
+static POPUP_CALLBACK: OnceLock<fn(&str, &str, LogSeverity)> = OnceLock::new();
+
+#[macro_export]
+macro_rules! dbg_server_impl {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SERVER_IMPL_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_client_impl {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CLIENT_IMPL_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_server_core {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SERVER_CORE_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_client_core {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CLIENT_CORE_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_connection {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CONNECTION_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_sockets {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SOCKETS_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_server_gfx {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::SERVER_GFX_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_client_gfx {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::CLIENT_GFX_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_encoder {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::ENCODER_DBG_LABEL, $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! dbg_decoder {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        $crate::log::debug!(target: $crate::DECODER_DBG_LABEL, $($args)*);
+    };
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct DebugGroupsConfig {
+    #[schema(flag = "steamvr-restart")]
+    pub server_impl: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub client_impl: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub server_core: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub client_core: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub connection: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub sockets: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub server_gfx: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub client_gfx: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub encoder: bool,
+    #[schema(flag = "steamvr-restart")]
+    pub decoder: bool,
+}
+
+pub fn filter_debug_groups(target: &str, config: &DebugGroupsConfig) -> bool {
+    match target {
+        SERVER_IMPL_DBG_LABEL => config.server_impl,
+        CLIENT_IMPL_DBG_LABEL => config.client_impl,
+        SERVER_CORE_DBG_LABEL => config.server_core,
+        CLIENT_CORE_DBG_LABEL => config.client_core,
+        CONNECTION_DBG_LABEL => config.connection,
+        SOCKETS_DBG_LABEL => config.sockets,
+        SERVER_GFX_DBG_LABEL => config.server_gfx,
+        CLIENT_GFX_DBG_LABEL => config.client_gfx,
+        ENCODER_DBG_LABEL => config.encoder,
+        DECODER_DBG_LABEL => config.decoder,
+        _ => true,
+    }
+}
+
+pub fn is_enabled_debug_group(target: &str, config: &DebugGroupsConfig) -> bool {
+    (config.server_impl && target == SERVER_IMPL_DBG_LABEL)
+        || (config.client_impl && target == CLIENT_IMPL_DBG_LABEL)
+        || (config.server_core && target == SERVER_CORE_DBG_LABEL)
+        || (config.client_core && target == CLIENT_CORE_DBG_LABEL)
+        || (config.connection && target == CONNECTION_DBG_LABEL)
+        || (config.sockets && target == SOCKETS_DBG_LABEL)
+        || (config.server_gfx && target == SERVER_GFX_DBG_LABEL)
+        || (config.client_gfx && target == CLIENT_GFX_DBG_LABEL)
+        || (config.encoder && target == ENCODER_DBG_LABEL)
+        || (config.decoder && target == DECODER_DBG_LABEL)
+}
+
+#[derive(
+    SettingsSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub enum LogSeverity {
+    Error = 3,
+    Warning = 2,
+    Info = 1,
+    Debug = 0,
+}
+
+impl LogSeverity {
+    pub fn from_log_level(level: log::Level) -> Self {
+        match level {
+            log::Level::Error => LogSeverity::Error,
+            log::Level::Warn => LogSeverity::Warning,
+            log::Level::Info => LogSeverity::Info,
+            log::Level::Debug | log::Level::Trace => LogSeverity::Debug,
+        }
+    }
+
+    pub fn into_log_level(self) -> log::Level {
+        match self {
+            LogSeverity::Error => log::Level::Error,
+            LogSeverity::Warning => log::Level::Warn,
+            LogSeverity::Info => log::Level::Info,
+            LogSeverity::Debug => log::Level::Debug,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LogEntry {
+    pub severity: LogSeverity,
+    pub content: String,
+}
+
+// The callback has parameters in order: title, message, severity
+pub fn set_popup_callback(callback: fn(&str, &str, LogSeverity)) {
+    POPUP_CALLBACK.set(callback).ok();
+}
 
 pub fn set_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
-        let message = panic_info
-            .payload()
-            .downcast_ref::<&str>()
-            .unwrap_or(&"Unavailable");
         let err_str = format!(
-            "Message: {message:?}\nBacktrace:\n{:?}",
-            backtrace::Backtrace::new()
+            "What happened:\n{panic_info}\n\nBacktrace:\n{:?}",
+            Backtrace::new()
         );
 
-        log::error!("{err_str}");
+        log::error!("ALVR panicked: {err_str}");
 
-        #[cfg(windows)]
-        std::thread::spawn(move || {
-            msgbox::create("ALVR panicked", &err_str, msgbox::IconType::Error).ok();
+        std::thread::spawn({
+            let panic_str = panic_info.to_string();
+            move || {
+                if let Some(callback) = POPUP_CALLBACK.get() {
+                    callback("ALVR panicked", &panic_str, LogSeverity::Error);
+                }
+            }
         });
     }))
 }
 
-pub fn show_w<W: Display>(w: W) {
+pub fn show_w<W: Display + Send + 'static>(w: W) {
     log::warn!("{w}");
 
-    // GDK crashes because of initialization in multiple thread
-    #[cfg(windows)]
-    std::thread::spawn({
-        let warn_string = w.to_string();
-        move || {
-            msgbox::create(
-                "ALVR encountered a non-fatal error",
-                &warn_string,
-                msgbox::IconType::Info,
-            )
-            .ok();
+    std::thread::spawn(move || {
+        if let Some(callback) = POPUP_CALLBACK.get() {
+            callback("ALVR warning", &w.to_string(), LogSeverity::Warning);
         }
     });
 }
 
-pub fn show_warn<T, E: Display>(res: Result<T, E>) -> Option<T> {
+pub fn show_warn<T, E: Display + Send + 'static>(res: Result<T, E>) -> Option<T> {
     res.map_err(show_w).ok()
 }
 
-#[allow(unused_variables)]
 fn show_e_block<E: Display>(e: E, blocking: bool) {
     log::error!("{e}");
 
-    // GDK crashes because of initialization in multiple thread
-    #[cfg(windows)]
-    {
-        // Store the last error shown in a message box. Do not open a new message box if the content
-        // of the error has not changed
-        use once_cell::sync::Lazy;
-        use parking_lot::Mutex;
+    // Store the last error shown in a message box. Do not open a new message box if the content
+    // of the error has not changed
 
-        static LAST_MESSAGEBOX_ERROR: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("".into()));
+    static LAST_MESSAGEBOX_ERROR: Mutex<String> = Mutex::new(String::new());
 
-        let err_string = e.to_string();
-        let last_messagebox_error_ref = &mut *LAST_MESSAGEBOX_ERROR.lock();
-        if *last_messagebox_error_ref != err_string {
-            let show_msgbox = {
-                let err_string = err_string.clone();
-                move || {
-                    msgbox::create(
-                        "ALVR encountered an error",
-                        &err_string,
-                        msgbox::IconType::Error,
-                    )
-                    .ok();
+    let err_string = e.to_string();
+    let last_messagebox_error_ref = &mut *LAST_MESSAGEBOX_ERROR.lock();
+    if *last_messagebox_error_ref != err_string {
+        let show_msgbox = {
+            let err_string = err_string.clone();
+            move || {
+                if let Some(callback) = POPUP_CALLBACK.get() {
+                    callback("ALVR error", &err_string, LogSeverity::Error);
                 }
-            };
-
-            if blocking {
-                show_msgbox();
-            } else {
-                std::thread::spawn(show_msgbox);
             }
+        };
 
-            *last_messagebox_error_ref = err_string;
+        if blocking {
+            show_msgbox();
+        } else {
+            std::thread::spawn(show_msgbox);
         }
+
+        *last_messagebox_error_ref = err_string;
     }
 }
 
@@ -102,37 +276,24 @@ pub fn show_err_blocking<T, E: Display>(res: Result<T, E>) -> Option<T> {
     res.map_err(|e| show_e_block(e, true)).ok()
 }
 
-pub async fn show_err_async<T, E: Display>(
-    future_res: impl Future<Output = Result<T, E>>,
-) -> Option<T> {
-    show_err(future_res.await)
+pub trait ToAny<T> {
+    fn to_any(self) -> Result<T>;
 }
 
-#[macro_export]
-macro_rules! fmt_e {
-    ($($args:tt)+) => {
-        Err(format!($($args)+))
-    };
+impl<T> ToAny<T> for Option<T> {
+    fn to_any(self) -> Result<T> {
+        match self {
+            Some(value) => Ok(value),
+            None => Err(anyhow::anyhow!("Unexpected None")),
+        }
+    }
 }
 
-#[macro_export]
-macro_rules! err {
-    () => {
-        |e| format!("At {}:{}: {e}", file!(), line!())
-    };
-}
-
-// trace_err variant for errors that do not implement fmt::Display
-#[macro_export]
-macro_rules! err_dbg {
-    () => {
-        |e| format!("At {}:{}: {e:?}", file!(), line!())
-    };
-}
-
-#[macro_export]
-macro_rules! enone {
-    () => {
-        || format!("At {}:{}", file!(), line!())
-    };
+impl<T, E: Error + Send + Sync + 'static> ToAny<T> for Result<T, E> {
+    fn to_any(self) -> Result<T> {
+        match self {
+            Ok(value) => Ok(value),
+            Err(e) => Err(e.into()),
+        }
+    }
 }

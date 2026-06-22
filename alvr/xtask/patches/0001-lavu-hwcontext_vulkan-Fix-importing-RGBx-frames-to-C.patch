@@ -1,0 +1,26 @@
+From 0ca5a8dc5fb841e21e042fcab04f0bde9fc06d91 Mon Sep 17 00:00:00 2001
+From: David Rosca <nowrep@gmail.com>
+Date: Tue, 28 Nov 2023 14:04:20 +0100
+Subject: [PATCH 1/6] lavu/hwcontext_vulkan: Fix importing RGBx frames to CUDA
+
+RGBx formats needs NumChannels = 4, but the old code would set it to 1.
+---
+ libavutil/hwcontext_vulkan.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libavutil/hwcontext_vulkan.c b/libavutil/hwcontext_vulkan.c
+index 65e2256e2d..4acce13d17 100644
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -3937,7 +3937,7 @@ static int vulkan_export_to_cuda(AVHWFramesContext *hwfc,
+                 .arrayDesc = {
+                     .Depth = 0,
+                     .Format = cufmt,
+-                    .NumChannels = 1 + ((planes == 2) && i),
++                    .NumChannels = desc->comp[i].step,
+                     .Flags = 0,
+                 },
+                 .numLevels = 1,
+-- 
+2.53.0
+

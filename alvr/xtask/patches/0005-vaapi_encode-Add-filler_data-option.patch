@@ -1,0 +1,52 @@
+From 413e436cb458b76f2969ba388478a290b06ec3c0 Mon Sep 17 00:00:00 2001
+From: David Rosca <nowrep@gmail.com>
+Date: Sat, 5 Aug 2023 11:09:35 +0200
+Subject: [PATCH 5/6] vaapi_encode: Add filler_data option
+
+---
+ libavcodec/vaapi_encode.c | 1 +
+ libavcodec/vaapi_encode.h | 9 ++++++++-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/vaapi_encode.c b/libavcodec/vaapi_encode.c
+index a266072d27..509ac2b1e3 100644
+--- a/libavcodec/vaapi_encode.c
++++ b/libavcodec/vaapi_encode.c
+@@ -1680,6 +1680,7 @@ rc_mode_found:
+             .rc_flags.bits.mb_rate_control = ctx->blbrc ? 1 : 2,
+ #endif
+         };
++        ctx->rc_params.rc_flags.bits.disable_bit_stuffing = !ctx->filler_data;
+         vaapi_encode_add_global_param(avctx,
+                                       VAEncMiscParameterTypeRateControl,
+                                       &ctx->rc_params,
+diff --git a/libavcodec/vaapi_encode.h b/libavcodec/vaapi_encode.h
+index cfb9b700b8..d3cb601923 100644
+--- a/libavcodec/vaapi_encode.h
++++ b/libavcodec/vaapi_encode.h
+@@ -155,6 +155,9 @@ typedef struct VAAPIEncodeContext {
+     // Max Frame Size
+     int             max_frame_size;
+ 
++    // Filler Data
++    int             filler_data;
++
+     // Explicitly set RC mode (otherwise attempt to pick from
+     // available modes).
+     int             explicit_rc_mode;
+@@ -361,7 +364,11 @@ int ff_vaapi_encode_close(AVCodecContext *avctx);
+     { "max_frame_size", \
+       "Maximum frame size (in bytes)",\
+       OFFSET(common.max_frame_size), AV_OPT_TYPE_INT, \
+-      { .i64 = 0 }, 0, INT_MAX / 8, FLAGS }
++      { .i64 = 0 }, 0, INT_MAX / 8, FLAGS }, \
++    { "filler_data", \
++      "Enable filler data", \
++      OFFSET(common.filler_data), AV_OPT_TYPE_BOOL, \
++      { .i64 = 1 }, 0, 1, FLAGS }
+ 
+ #define VAAPI_ENCODE_RC_MODE(name, desc) \
+     { #name, desc, 0, AV_OPT_TYPE_CONST, { .i64 = RC_MODE_ ## name }, \
+-- 
+2.53.0
+

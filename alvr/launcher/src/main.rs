@@ -1,257 +1,92 @@
-#![windows_subsystem = "windows"]
+mod actions;
+mod ui;
 
-mod commands;
+use eframe::egui::{IconData, ViewportBuilder};
+use ico::IconDir;
+use std::{collections::BTreeMap, env, fs, io::Cursor, sync::mpsc, thread};
+use ui::Launcher;
 
-use alvr_common::prelude::*;
-use alvr_filesystem as afs;
-use druid::{
-    commands::CLOSE_WINDOW,
-    theme,
-    widget::{Button, CrossAxisAlignment, Flex, FlexParams, Label, LineBreaking, ViewSwitcher},
-    AppDelegate, AppLauncher, Color, Command, Data, DelegateCtx, Env, ExtEventSink, FontDescriptor,
-    Handled, Screen, Selector, Target, Widget, WindowDesc, WindowId,
-};
-use std::{env, thread, time::Duration};
-
-const WINDOW_WIDTH: f64 = 500.0;
-const WINDOW_HEIGHT: f64 = 300.0;
-
-const CHANGE_VIEW_CMD: Selector<View> = Selector::new("change_view");
-
-#[derive(Clone, PartialEq, Data)]
-enum View {
-    RequirementsCheck { steamvr: String },
-    Launching { resetting: bool },
+pub struct ReleaseChannelsInfo {
+    stable: Vec<ReleaseInfo>,
+    nightly: Vec<ReleaseInfo>,
 }
 
-fn launcher_lifecycle(handle: ExtEventSink, window_id: WindowId) {
-    loop {
-        let steamvr_ok = commands::check_steamvr_installation();
-
-        if steamvr_ok {
-            break;
-        } else {
-            let steamvr_string =
-                "SteamVR not installed: make sure you launched it at least once, then close it.";
-
-            handle
-                .submit_command(
-                    CHANGE_VIEW_CMD,
-                    View::RequirementsCheck {
-                        steamvr: steamvr_string.to_owned(),
-                    },
-                    Target::Auto,
-                )
-                .ok();
-
-            thread::sleep(Duration::from_millis(500));
-        }
-    }
-
-    handle
-        .submit_command(
-            CHANGE_VIEW_CMD,
-            View::Launching { resetting: false },
-            Target::Auto,
-        )
-        .ok();
-
-    let request_agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_millis(100))
-        .build();
-
-    let mut tried_steamvr_launch = false;
-    loop {
-        // get a small non-code file
-        let maybe_response = request_agent.get("http://127.0.0.1:8082/index.html").call();
-        if let Ok(response) = maybe_response {
-            if response.status() == 200 {
-                handle.submit_command(CLOSE_WINDOW, (), window_id).ok();
-                break;
-            }
-        }
-
-        // try to launch SteamVR only one time automatically
-        if !tried_steamvr_launch {
-            if alvr_common::show_err(commands::maybe_register_alvr_driver()).is_some() {
-                if commands::is_steamvr_running() {
-                    commands::kill_steamvr();
-                    thread::sleep(Duration::from_secs(2))
-                }
-                commands::maybe_launch_steamvr();
-            }
-            tried_steamvr_launch = true;
-        }
-
-        thread::sleep(Duration::from_millis(500));
-    }
+pub struct Progress {
+    message: String,
+    progress: f32,
 }
 
-fn reset_and_retry(handle: ExtEventSink) {
-    thread::spawn(move || {
-        handle
-            .submit_command(
-                CHANGE_VIEW_CMD,
-                View::Launching { resetting: true },
-                Target::Auto,
-            )
-            .ok();
-
-        commands::kill_steamvr();
-
-        commands::fix_steamvr();
-
-        commands::restart_steamvr();
-
-        thread::sleep(Duration::from_secs(2));
-
-        handle
-            .submit_command(
-                CHANGE_VIEW_CMD,
-                View::Launching { resetting: false },
-                Target::Auto,
-            )
-            .ok();
-    });
+pub enum WorkerMessage {
+    ReleaseChannelsInfo(ReleaseChannelsInfo),
+    ProgressUpdate(Progress),
+    Done,
+    Error(String),
 }
 
-fn gui() -> impl Widget<View> {
-    ViewSwitcher::new(
-        |view: &View, _| view.clone(),
-        |view, _, _| match view {
-            View::RequirementsCheck { steamvr } => Box::new(
-                Flex::row()
-                    .with_default_spacer()
-                    .with_flex_child(
-                        Flex::column()
-                            .cross_axis_alignment(CrossAxisAlignment::Start)
-                            .with_flex_spacer(1.0)
-                            .with_child(
-                                Label::new(steamvr.clone())
-                                    .with_line_break_mode(LineBreaking::WordWrap),
-                            )
-                            .with_default_spacer()
-                            .with_flex_spacer(1.5),
-                        FlexParams::new(1.0, None),
-                    )
-                    .with_default_spacer(),
-            ),
-            View::Launching { resetting } => {
-                let mut flex = Flex::column()
-                    .with_spacer(60.0)
-                    .with_child(Label::new("Waiting for server to load...").with_text_size(25.0))
-                    .with_default_spacer();
-                if !resetting {
-                    flex = flex.with_child(
-                        Button::new("Reset drivers and retry")
-                            .on_click(move |ctx, _, _| reset_and_retry(ctx.get_external_handle())),
-                    )
-                } else {
-                    flex = flex.with_child(Label::new("Please wait for multiple restarts"))
-                }
-
-                Box::new(flex.with_flex_spacer(1.0))
-            }
-        },
-    )
+#[derive(Clone)]
+pub struct ReleaseInfo {
+    version: String,
+    assets: BTreeMap<String, String>,
 }
 
-struct Delegate;
-
-impl AppDelegate<View> for Delegate {
-    fn command(
-        &mut self,
-        _: &mut DelegateCtx,
-        _: Target,
-        cmd: &Command,
-        view: &mut View,
-        _: &Env,
-    ) -> Handled {
-        if let Some(new_view) = cmd.get(CHANGE_VIEW_CMD) {
-            *view = new_view.clone();
-            Handled::Yes
-        } else {
-            Handled::No
-        }
-    }
+pub enum UiMessage {
+    InstallServer {
+        release_info: ReleaseInfo,
+        session_version: Option<String>,
+    },
+    InstallClient(ReleaseInfo),
+    Quit,
 }
 
-fn get_window_location() -> (f64, f64) {
-    let screen_size = Screen::get_monitors()
-        .into_iter()
-        .find(|m| m.is_primary())
-        .map(|m| m.virtual_work_rect().size())
-        .unwrap_or_default();
-
-    (
-        (screen_size.width - WINDOW_WIDTH) / 2.0,
-        (screen_size.height - WINDOW_HEIGHT) / 2.0,
-    )
-}
-
-fn make_window() -> StrResult {
-    let instance_mutex =
-        single_instance::SingleInstance::new("alvr_launcher_mutex").map_err(err!())?;
-    if instance_mutex.is_single() {
-        let driver_dir = afs::filesystem_layout_from_launcher_exe(&env::current_exe().unwrap())
-            .openvr_driver_root_dir;
-
-        if driver_dir.to_str().filter(|s| s.is_ascii()).is_none() {
-            alvr_common::show_e_blocking(format!(
-                "The path of this folder ({}) contains non ASCII characters. {}",
-                driver_dir.to_string_lossy(),
-                "Please move it somewhere else (for example in C:\\Users\\Public\\Documents).",
-            ));
-            return Ok(());
-        }
-
-        #[cfg(target_os = "linux")]
-        gtk::init().map_err(err!())?;
-
-        let window = WindowDesc::new(gui)
-            .title("ALVR Launcher")
-            .window_size((WINDOW_WIDTH, WINDOW_HEIGHT))
-            .with_min_size((WINDOW_WIDTH, WINDOW_HEIGHT))
-            .resizable(false)
-            .set_position(get_window_location());
-
-        let state = View::RequirementsCheck { steamvr: "".into() };
-
-        let window_id = window.id;
-
-        let app = AppLauncher::with_window(window)
-            .use_simple_logger()
-            .configure_env(|env, _| {
-                env.set(theme::UI_FONT, FontDescriptor::default().with_size(15.0));
-                env.set(theme::LABEL_COLOR, Color::rgb8(0, 0, 0));
-                env.set(
-                    theme::WINDOW_BACKGROUND_COLOR,
-                    Color::rgb8(0xFF, 0xFF, 0xFF),
-                );
-                env.set(theme::WIDGET_PADDING_HORIZONTAL, 35);
-                env.set(theme::WIDGET_PADDING_VERTICAL, 15);
-
-                // button gradient
-                env.set(theme::BUTTON_LIGHT, Color::rgb8(0xF0, 0xF0, 0xF0));
-                env.set(theme::BUTTON_DARK, Color::rgb8(0xCC, 0xCC, 0xCC));
-            })
-            .delegate(Delegate);
-
-        let handle = app.get_external_handle();
-        thread::spawn(move || launcher_lifecycle(handle, window_id));
-
-        app.launch(state).map_err(err!())?;
-    }
-    Ok(())
+pub struct InstallationInfo {
+    version: String,
+    is_apk_downloaded: bool,
+    has_session_json: bool, // Only relevant on Windows
 }
 
 fn main() {
-    let args = env::args().collect::<Vec<_>>();
-    match args.get(1) {
-        Some(flag) if flag == "--restart-steamvr" => commands::restart_steamvr(),
-        Some(flag) if flag == "--update" => commands::invoke_installer(),
-        Some(_) | None => {
-            alvr_common::show_err_blocking(make_window());
-        }
+    let (worker_message_sender, worker_message_receiver) = mpsc::channel::<WorkerMessage>();
+    let (ui_message_sender, ui_message_receiver) = mpsc::channel::<UiMessage>();
+
+    let worker_handle =
+        thread::spawn(|| actions::worker(ui_message_receiver, worker_message_sender));
+
+    let ico = IconDir::read(Cursor::new(include_bytes!(
+        "../../dashboard/resources/dashboard.ico"
+    )))
+    .unwrap();
+    let image = ico.entries().first().unwrap().decode().unwrap();
+
+    // Workaround for the steam deck
+    if fs::read_to_string("/sys/devices/virtual/dmi/id/board_vendor")
+        .map(|vendor| vendor.trim() == "Valve")
+        .unwrap_or(false)
+    {
+        unsafe { env::set_var("WINIT_X11_SCALE_FACTOR", "1") };
     }
+
+    eframe::run_native(
+        "ALVR Launcher",
+        eframe::NativeOptions {
+            viewport: ViewportBuilder::default()
+                .with_app_id("alvr.launcher")
+                .with_inner_size((700.0, 400.0))
+                .with_icon(IconData {
+                    rgba: image.rgba_data().to_owned(),
+                    width: image.width(),
+                    height: image.height(),
+                }),
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            Ok(Box::new(Launcher::new(
+                cc,
+                worker_message_receiver,
+                ui_message_sender,
+            )))
+        }),
+    )
+    .expect("Failed to run eframe");
+
+    worker_handle.join().unwrap();
 }
